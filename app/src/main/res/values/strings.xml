@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">AutoTube Studio</string>
+    <string name="cd_studio_hero">AutoTube Studio visual banner</string>
+    <string name="cd_empty_projects">No video projects created yet</string>
+    <string name="cd_youtube_channel">Connected YouTube channel status</string>
+    <string name="cd_back">Navigate back</string>
+    <string name="cd_refresh">Refresh studio data</string>
+    <string name="cd_settings">Open settings</string>
+    <string name="cd_notifications">Notifications</string>
+</resources>

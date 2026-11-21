@@ -1,0 +1,93 @@
+# Render Blueprint — AutoTube Studio Cloud Backend
+# Provisions:
+#   1. Web Service (REST API + OAuth callbacks + Health check)
+#   2. Background Worker (Persistent PostgreSQL queue consumer + FFmpeg video renderer)
+#   3. Cron Job (Every 5 minutes: evaluates active user Autopilot schedules)
+services:
+  - type: web
+    name: autotube-studio-api
+    runtime: docker
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    region: oregon
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "8080"
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: CREDENTIAL_ENCRYPTION_KEY
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: YOUTUBE_OAUTH_REDIRECT_URI
+        sync: false
+      - key: ANDROID_OAUTH_CALLBACK_URI
+        value: autotubestudio://oauth/youtube
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false
+
+  - type: worker
+    name: autotube-studio-worker
+    runtime: docker
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+    dockerCommand: node dist/worker.js
+    plan: standard
+    region: oregon
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: CREDENTIAL_ENCRYPTION_KEY
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: YOUTUBE_OAUTH_REDIRECT_URI
+        sync: false
+      - key: WORKER_POLL_INTERVAL_MS
+        value: "4000"
+      - key: WORKER_HEARTBEAT_INTERVAL_MS
+        value: "20000"
+      - key: WORKER_STALE_JOB_SECONDS
+        value: "180"
+
+  - type: cron
+    name: autotube-studio-scheduler
+    runtime: docker
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+    dockerCommand: node dist/scheduler.js
+    schedule: "*/5 * * * *"
+    region: oregon
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: CREDENTIAL_ENCRYPTION_KEY
+        sync: false

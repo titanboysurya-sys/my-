@@ -1,0 +1,6 @@
+{
+  "name": "AutoTube Studio",
+  "description": "AI-automated YouTube content creator studio with multi-user cloud backend, BYOK API management, FFmpeg video production, and scheduled publishing.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -20,6 +20,7 @@ data class StudioAppSettings(
     val backendApiUrl: String = DEFAULT_BACKEND_URL,
     val supabaseUrl: String = DEFAULT_SUPABASE_URL,
     val supabaseAnonKey: String = DEFAULT_SUPABASE_ANON_KEY,
+    val googleWebClientId: String = "",
     val darkTheme: Boolean = true,
     val appLanguage: String = "en",
     val defaultQuality: String = "1080p",
@@ -50,6 +51,7 @@ class StudioPreferencesStore(private val context: Context) {
                 ?: StudioAppSettings.DEFAULT_SUPABASE_URL,
             supabaseAnonKey = prefs[KEY_SUPABASE_ANON_KEY]
                 ?: StudioAppSettings.DEFAULT_SUPABASE_ANON_KEY,
+            googleWebClientId = prefs[KEY_GOOGLE_WEB_CLIENT_ID] ?: "",
             darkTheme = prefs[KEY_DARK_THEME] ?: true,
             appLanguage = prefs[KEY_LANGUAGE] ?: "en",
             defaultQuality = prefs[KEY_QUALITY] ?: "1080p",
@@ -68,12 +70,16 @@ class StudioPreferencesStore(private val context: Context) {
     suspend fun updateCloudEndpoints(
         backendUrl: String,
         supabaseUrl: String,
-        supabaseAnonKey: String
+        supabaseAnonKey: String,
+        googleWebClientId: String? = null
     ) {
         context.studioDataStore.edit { prefs ->
             prefs[KEY_BACKEND_URL] = backendUrl.trim().trimEnd('/')
             prefs[KEY_SUPABASE_URL] = supabaseUrl.trim().trimEnd('/')
             prefs[KEY_SUPABASE_ANON_KEY] = supabaseAnonKey.trim()
+            if (googleWebClientId != null) {
+                prefs[KEY_GOOGLE_WEB_CLIENT_ID] = googleWebClientId.trim()
+            }
         }
     }
 
@@ -117,6 +123,7 @@ class StudioPreferencesStore(private val context: Context) {
         private val KEY_BACKEND_URL = stringPreferencesKey("backend_api_url")
         private val KEY_SUPABASE_URL = stringPreferencesKey("supabase_url")
         private val KEY_SUPABASE_ANON_KEY = stringPreferencesKey("supabase_anon_key")
+        private val KEY_GOOGLE_WEB_CLIENT_ID = stringPreferencesKey("google_web_client_id")
         private val KEY_DARK_THEME = booleanPreferencesKey("dark_theme")
         private val KEY_LANGUAGE = stringPreferencesKey("app_language")
         private val KEY_QUALITY = stringPreferencesKey("default_quality")

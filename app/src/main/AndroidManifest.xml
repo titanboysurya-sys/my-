@@ -29,7 +29,7 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
-            <!-- Deep link callback for YouTube OAuth 2.0 return from Custom Tabs -->
+            <!-- Deep link callbacks for YouTube OAuth 2.0 and Supabase Google Sign-In -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -38,6 +38,10 @@
                     android:scheme="autotubestudio"
                     android:host="oauth"
                     android:pathPrefix="/youtube" />
+                <data
+                    android:scheme="autotubestudio"
+                    android:host="oauth"
+                    android:pathPrefix="/supabase" />
             </intent-filter>
         </activity>
     </application>

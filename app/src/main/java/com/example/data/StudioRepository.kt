@@ -19,7 +19,9 @@ import com.example.core.network.RegenerateScriptRequest
 import com.example.core.network.SaveCredentialResponse
 import com.example.core.network.ScheduleDto
 import com.example.core.network.ScriptDto
+import android.net.Uri
 import com.example.core.network.SupabaseAuthRequest
+import com.example.core.network.SupabaseIdTokenRequest
 import com.example.core.network.TopicResearchRequest
 import com.example.core.network.TopicResearchResponse
 import com.example.core.network.UpdateScheduleRequest
@@ -135,6 +137,72 @@ class StudioRepository(
             accessToken = accessToken,
             refreshToken = res.refreshToken ?: "",
             expiresAtEpochSec = (System.currentTimeMillis() / 1000L) + (res.expiresIn ?: 3600L)
+        )
+        sessionStore.saveSession(session)
+        session
+    }
+
+    suspend fun signInWithGoogleIdToken(
+        idToken: String,
+        backendUrl: String,
+        supabaseUrl: String,
+        supabaseAnonKey: String,
+        googleWebClientId: String
+    ): Result<AuthSession> = safeApiCall {
+        prefsStore.updateCloudEndpoints(backendUrl, supabaseUrl, supabaseAnonKey, googleWebClientId)
+        require(supabaseAnonKey.isNotBlank()) { "Supabase Anon Key is required for Google Sign-In." }
+
+        val res = client.supabaseAuthApi(supabaseUrl).signInWithIdToken(
+            anonKey = supabaseAnonKey.trim(),
+            body = SupabaseIdTokenRequest(provider = "google", idToken = idToken)
+        )
+        val accessToken = res.accessToken
+            ?: throw IllegalStateException("Supabase did not return an access token for Google Sign-In.")
+        val user = res.user
+            ?: throw IllegalStateException("Supabase response missing user account details.")
+
+        val session = AuthSession(
+            userId = user.id,
+            email = user.email ?: "Google Creator",
+            accessToken = accessToken,
+            refreshToken = res.refreshToken ?: "",
+            expiresAtEpochSec = (System.currentTimeMillis() / 1000L) + (res.expiresIn ?: 3600L)
+        )
+        sessionStore.saveSession(session)
+        session
+    }
+
+    suspend fun buildSupabaseGoogleOAuthUrl(
+        backendUrl: String,
+        supabaseUrl: String,
+        supabaseAnonKey: String,
+        googleWebClientId: String
+    ): Result<String> = safeApiCall {
+        prefsStore.updateCloudEndpoints(backendUrl, supabaseUrl, supabaseAnonKey, googleWebClientId)
+        val cleanSupabase = supabaseUrl.trim().trimEnd('/')
+        require(cleanSupabase.startsWith("https://")) { "Enter a valid HTTPS Supabase Project URL first." }
+        require(supabaseAnonKey.isNotBlank()) { "Enter your Supabase Publishable / Anon Key first." }
+        val redirect = Uri.encode("autotubestudio://oauth/supabase")
+        "$cleanSupabase/auth/v1/authorize?provider=google&redirect_to=$redirect"
+    }
+
+    suspend fun completeSupabaseOAuthSession(
+        accessToken: String,
+        refreshToken: String,
+        expiresInSec: Long
+    ): Result<AuthSession> = safeApiCall {
+        val current = prefsStore.currentSettings()
+        require(current.supabaseAnonKey.isNotBlank()) { "Supabase Publishable / Anon Key is missing." }
+        val user = client.supabaseAuthApi(current.supabaseUrl).getCurrentUser(
+            anonKey = current.supabaseAnonKey.trim(),
+            bearerToken = "Bearer $accessToken"
+        )
+        val session = AuthSession(
+            userId = user.id,
+            email = user.email ?: "Google Creator",
+            accessToken = accessToken,
+            refreshToken = refreshToken,
+            expiresAtEpochSec = (System.currentTimeMillis() / 1000L) + expiresInSec
         )
         sessionStore.saveSession(session)
         session

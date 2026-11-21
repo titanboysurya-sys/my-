@@ -123,11 +123,18 @@ class MainActivity : ComponentActivity() {
     private fun handleOAuthIntent(intent: Intent?) {
         val data = intent?.data ?: return
         if (data.scheme == "autotubestudio" && data.host == "oauth") {
-            viewModel.handleYouTubeOAuthDeepLink(
-                status = data.getQueryParameter("status"),
-                channel = data.getQueryParameter("channel"),
-                message = data.getQueryParameter("message")
-            )
+            when {
+                data.path?.startsWith("/supabase") == true -> {
+                    viewModel.handleSupabaseOAuthDeepLink(data)
+                }
+                else -> {
+                    viewModel.handleYouTubeOAuthDeepLink(
+                        status = data.getQueryParameter("status"),
+                        channel = data.getQueryParameter("channel"),
+                        message = data.getQueryParameter("message")
+                    )
+                }
+            }
         }
     }
 }
@@ -174,6 +181,8 @@ private fun AutoTubeStudioRoot(viewModel: StudioViewModel) {
                     settings = settings,
                     uiState = uiState,
                     onCheckHealth = viewModel::checkServerHealth,
+                    onSignInWithGoogleIdToken = viewModel::signInWithGoogleIdToken,
+                    onLaunchGoogleBrowserSignIn = viewModel::launchSupabaseGoogleOAuth,
                     onSignIn = viewModel::signIn,
                     onSignUp = viewModel::signUp
                 )

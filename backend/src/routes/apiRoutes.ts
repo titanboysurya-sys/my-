@@ -634,6 +634,39 @@ apiRouter.delete('/projects/:id', async (req: AuthenticatedRequest, res: Respons
     const userId = getAuthUserId(req);
     const projectId = z.string().uuid().parse(req.params.id);
     const supabase = getSupabaseAdmin();
+
+    const [{ data: proj }, { data: assets }] = await Promise.all([
+      supabase
+        .from('projects')
+        .select('narration_audio_path, subtitle_srt_path, thumbnail_storage_path, final_video_storage_path')
+        .eq('id', projectId)
+        .eq('user_id', userId)
+        .maybeSingle(),
+      supabase
+        .from('media_assets')
+        .select('storage_path')
+        .eq('project_id', projectId)
+        .eq('user_id', userId)
+        .not('storage_path', 'is', null),
+    ]);
+
+    const sourcePaths = (assets || []).map((a) => a.storage_path as string).filter(Boolean);
+    if (sourcePaths.length > 0) {
+      await supabase.storage.from('source-media').remove(sourcePaths).catch(() => undefined);
+    }
+    if (proj?.narration_audio_path) {
+      await supabase.storage.from('voice-audio').remove([proj.narration_audio_path]).catch(() => undefined);
+    }
+    if (proj?.final_video_storage_path) {
+      await supabase.storage.from('rendered-videos').remove([proj.final_video_storage_path]).catch(() => undefined);
+    }
+    if (proj?.subtitle_srt_path) {
+      await supabase.storage.from('subtitles').remove([proj.subtitle_srt_path]).catch(() => undefined);
+    }
+    if (proj?.thumbnail_storage_path) {
+      await supabase.storage.from('thumbnails').remove([proj.thumbnail_storage_path]).catch(() => undefined);
+    }
+
     const { error } = await supabase
       .from('projects')
       .delete()

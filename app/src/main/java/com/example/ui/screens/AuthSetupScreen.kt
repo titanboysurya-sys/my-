@@ -20,6 +20,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.AccountCircle
 import androidx.compose.material.icons.rounded.CloudDone
 import androidx.compose.material.icons.rounded.Email
 import androidx.compose.material.icons.rounded.ExpandLess
@@ -27,6 +28,7 @@ import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.PlayCircle
+import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.Button
@@ -34,6 +36,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -48,6 +51,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -56,37 +60,66 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.credentials.CredentialManager
+import androidx.credentials.CustomCredential
+import androidx.credentials.GetCredentialRequest
+import androidx.credentials.exceptions.GetCredentialCancellationException
 import com.example.R
 import com.example.core.datastore.StudioAppSettings
 import com.example.ui.theme.PipelineCyan
 import com.example.ui.theme.SignalCrimson
 import com.example.ui.theme.StudioEmerald
 import com.example.ui.viewmodel.StudioUiState
+import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
+import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
+import kotlinx.coroutines.launch
 
 @Composable
 fun AuthSetupScreen(
     settings: StudioAppSettings,
     uiState: StudioUiState,
     onCheckHealth: (String) -> Unit,
+    onSignInWithGoogleIdToken: (
+        idToken: String,
+        backendUrl: String,
+        supabaseUrl: String,
+        anonKey: String,
+        googleWebClientId: String
+    ) -> Unit,
+    onLaunchGoogleBrowserSignIn: (
+        backendUrl: String,
+        supabaseUrl: String,
+        anonKey: String,
+        googleWebClientId: String
+    ) -> Unit,
     onSignIn: (email: String, password: String, backendUrl: String, supabaseUrl: String, anonKey: String) -> Unit,
     onSignUp: (email: String, password: String, backendUrl: String, supabaseUrl: String, anonKey: String) -> Unit
 ) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    var showEmailLogin by rememberSaveable { mutableStateOf(false) }
     var isSignUpMode by rememberSaveable { mutableStateOf(false) }
     var email by rememberSaveable { mutableStateOf("") }
     var password by rememberSaveable { mutableStateOf("") }
     var showPassword by rememberSaveable { mutableStateOf(false) }
-    var showCloudConfig by rememberSaveable { mutableStateOf(true) }
+    var showCloudConfig by rememberSaveable {
+        mutableStateOf(settings.supabaseAnonKey.isBlank() || settings.backendApiUrl.contains("your-autotube-api"))
+    }
 
     var backendUrl by remember(settings.backendApiUrl) { mutableStateOf(settings.backendApiUrl) }
     var supabaseUrl by remember(settings.supabaseUrl) { mutableStateOf(settings.supabaseUrl) }
     var supabaseAnonKey by remember(settings.supabaseAnonKey) { mutableStateOf(settings.supabaseAnonKey) }
+    var googleWebClientId by remember(settings.googleWebClientId) { mutableStateOf(settings.googleWebClientId) }
 
     Box(
         modifier = Modifier
@@ -149,14 +182,14 @@ fun AuthSetupScreen(
                     }
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "Automated cloud video creation, FFmpeg rendering & YouTube scheduling",
+                        text = "24x7 cloud video automation, FFmpeg rendering & YouTube scheduling",
                         style = MaterialTheme.typography.bodySmall,
                         color = Color(0xFFCBD5E1)
                     )
                 }
             }
 
-            // Auth Card
+            // Primary Google One-Tap Auth Card
             Card(
                 shape = MaterialTheme.shapes.large,
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -166,78 +199,190 @@ fun AuthSetupScreen(
                     modifier = Modifier.padding(18.dp),
                     verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
-                    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                        SegmentedButton(
-                            selected = !isSignUpMode,
-                            onClick = { isSignUpMode = false },
-                            shape = SegmentedButtonDefaults.itemShape(0, 2),
-                            modifier = Modifier.testTag("auth_tab_sign_in")
-                        ) { Text("Sign In") }
-                        SegmentedButton(
-                            selected = isSignUpMode,
-                            onClick = { isSignUpMode = true },
-                            shape = SegmentedButtonDefaults.itemShape(1, 2),
-                            modifier = Modifier.testTag("auth_tab_sign_up")
-                        ) { Text("Create Account") }
-                    }
-
-                    OutlinedTextField(
-                        value = email,
-                        onValueChange = { email = it },
-                        label = { Text("Email address") },
-                        leadingIcon = { Icon(Icons.Rounded.Email, contentDescription = null) },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("auth_email_input")
+                    Text(
+                        text = "Sign in to your Studio",
+                        style = MaterialTheme.typography.titleLarge
                     )
-
-                    OutlinedTextField(
-                        value = password,
-                        onValueChange = { password = it },
-                        label = { Text("Password") },
-                        leadingIcon = { Icon(Icons.Rounded.Lock, contentDescription = null) },
-                        trailingIcon = {
-                            IconButton(onClick = { showPassword = !showPassword }) {
-                                Icon(
-                                    imageVector = if (showPassword) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
-                                    contentDescription = "Toggle password visibility"
-                                )
-                            }
-                        },
-                        visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("auth_password_input")
+                    Text(
+                        text = "Sign in in one tap with your Google account — no password needed.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
 
                     Button(
                         onClick = {
-                            if (isSignUpMode) {
-                                onSignUp(email, password, backendUrl, supabaseUrl, supabaseAnonKey)
+                            val trimmedClientId = googleWebClientId.trim()
+                            if (trimmedClientId.isNotBlank()) {
+                                scope.launch {
+                                    try {
+                                        val credentialManager = CredentialManager.create(context)
+                                        val googleOption = GetSignInWithGoogleOption.Builder(trimmedClientId)
+                                            .build()
+                                        val request = GetCredentialRequest.Builder()
+                                            .addCredentialOption(googleOption)
+                                            .build()
+                                        val result = credentialManager.getCredential(
+                                            context = context,
+                                            request = request
+                                        )
+                                        val credential = result.credential
+                                        if (credential is CustomCredential &&
+                                            credential.type == GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL
+                                        ) {
+                                            val googleCred = GoogleIdTokenCredential.createFrom(credential.data)
+                                            onSignInWithGoogleIdToken(
+                                                googleCred.idToken,
+                                                backendUrl,
+                                                supabaseUrl,
+                                                supabaseAnonKey,
+                                                trimmedClientId
+                                            )
+                                        } else {
+                                            onLaunchGoogleBrowserSignIn(
+                                                backendUrl,
+                                                supabaseUrl,
+                                                supabaseAnonKey,
+                                                trimmedClientId
+                                            )
+                                        }
+                                    } catch (_: GetCredentialCancellationException) {
+                                        // User dismissed One-Tap sheet intentionally
+                                    } catch (_: Exception) {
+                                        // Fallback seamlessly to Chrome Custom Tabs Google OAuth
+                                        onLaunchGoogleBrowserSignIn(
+                                            backendUrl,
+                                            supabaseUrl,
+                                            supabaseAnonKey,
+                                            trimmedClientId
+                                        )
+                                    }
+                                }
                             } else {
-                                onSignIn(email, password, backendUrl, supabaseUrl, supabaseAnonKey)
+                                onLaunchGoogleBrowserSignIn(
+                                    backendUrl,
+                                    supabaseUrl,
+                                    supabaseAnonKey,
+                                    trimmedClientId
+                                )
                             }
                         },
                         enabled = !uiState.isLoading,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(52.dp)
-                            .testTag("auth_submit_button"),
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                            .height(54.dp)
+                            .testTag("auth_google_one_tap_button"),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color.White,
+                            contentColor = Color(0xFF111827)
+                        )
                     ) {
                         if (uiState.isLoading) {
                             CircularProgressIndicator(
                                 modifier = Modifier.size(20.dp),
                                 strokeWidth = 2.dp,
-                                color = MaterialTheme.colorScheme.onPrimary
+                                color = Color(0xFF111827)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                        } else {
+                            Icon(
+                                imageVector = Icons.Rounded.AccountCircle,
+                                contentDescription = null,
+                                tint = Color(0xFF4285F4),
+                                modifier = Modifier.size(24.dp)
                             )
                             Spacer(modifier = Modifier.width(10.dp))
                         }
-                        Text(if (isSignUpMode) "Create Studio Account" else "Sign In to Studio")
+                        Text(
+                            text = "Continue with Google (One-Tap)",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        HorizontalDivider(modifier = Modifier.weight(1f))
+                        TextButton(
+                            onClick = { showEmailLogin = !showEmailLogin },
+                            modifier = Modifier.testTag("auth_toggle_email_button")
+                        ) {
+                            Text(
+                                text = if (showEmailLogin) "Hide Email Login" else "Use Email & Password",
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                        }
+                        HorizontalDivider(modifier = Modifier.weight(1f))
+                    }
+
+                    if (showEmailLogin) {
+                        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                            SegmentedButton(
+                                selected = !isSignUpMode,
+                                onClick = { isSignUpMode = false },
+                                shape = SegmentedButtonDefaults.itemShape(0, 2),
+                                modifier = Modifier.testTag("auth_tab_sign_in")
+                            ) { Text("Sign In") }
+                            SegmentedButton(
+                                selected = isSignUpMode,
+                                onClick = { isSignUpMode = true },
+                                shape = SegmentedButtonDefaults.itemShape(1, 2),
+                                modifier = Modifier.testTag("auth_tab_sign_up")
+                            ) { Text("Create Account") }
+                        }
+
+                        OutlinedTextField(
+                            value = email,
+                            onValueChange = { email = it },
+                            label = { Text("Email address") },
+                            leadingIcon = { Icon(Icons.Rounded.Email, contentDescription = null) },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("auth_email_input")
+                        )
+
+                        OutlinedTextField(
+                            value = password,
+                            onValueChange = { password = it },
+                            label = { Text("Password") },
+                            leadingIcon = { Icon(Icons.Rounded.Lock, contentDescription = null) },
+                            trailingIcon = {
+                                IconButton(onClick = { showPassword = !showPassword }) {
+                                    Icon(
+                                        imageVector = if (showPassword) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
+                                        contentDescription = "Toggle password visibility"
+                                    )
+                                }
+                            },
+                            visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("auth_password_input")
+                        )
+
+                        Button(
+                            onClick = {
+                                if (isSignUpMode) {
+                                    onSignUp(email, password, backendUrl, supabaseUrl, supabaseAnonKey)
+                                } else {
+                                    onSignIn(email, password, backendUrl, supabaseUrl, supabaseAnonKey)
+                                }
+                            },
+                            enabled = !uiState.isLoading,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                                .testTag("auth_submit_button"),
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                        ) {
+                            Text(if (isSignUpMode) "Create Studio Account" else "Sign In with Email")
+                        }
                     }
                 }
             }
@@ -288,7 +433,7 @@ fun AuthSetupScreen(
                             value = backendUrl,
                             onValueChange = { backendUrl = it },
                             label = { Text("Render Backend API URL") },
-                            placeholder = { Text("https://autotube-studio-api.onrender.com") },
+                            placeholder = { Text("https://auto-studio-xm5k.onrender.com") },
                             singleLine = true,
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -309,12 +454,24 @@ fun AuthSetupScreen(
                         OutlinedTextField(
                             value = supabaseAnonKey,
                             onValueChange = { supabaseAnonKey = it },
-                            label = { Text("Supabase Public Anon Key") },
+                            label = { Text("Supabase Publishable / Anon Key") },
                             leadingIcon = { Icon(Icons.Rounded.Key, contentDescription = null) },
                             singleLine = true,
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .testTag("supabase_anon_key_input")
+                        )
+                        Spacer(modifier = Modifier.height(10.dp))
+                        OutlinedTextField(
+                            value = googleWebClientId,
+                            onValueChange = { googleWebClientId = it },
+                            label = { Text("Google Web Client ID (Optional Native One-Tap)") },
+                            placeholder = { Text("xxxx.apps.googleusercontent.com") },
+                            leadingIcon = { Icon(Icons.Rounded.VerifiedUser, contentDescription = null) },
+                            singleLine = true,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("google_client_id_input")
                         )
                         Spacer(modifier = Modifier.height(12.dp))
                         Row(

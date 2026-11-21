@@ -1,8 +1,10 @@
 package com.example.ui.viewmodel
 
+import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import java.net.URLDecoder
 import com.example.core.database.CachedCredentialEntity
 import com.example.core.database.CachedJobEntity
 import com.example.core.database.CachedNotificationEntity
@@ -103,6 +105,96 @@ class StudioViewModel(
             refreshDashboard()
         } else {
             showError("YouTube connection failed: ${message ?: "Authorization cancelled"}")
+        }
+    }
+
+    fun handleSupabaseOAuthDeepLink(uri: Uri) {
+        val params = mutableMapOf<String, String>()
+        uri.queryParameterNames.forEach { key ->
+            uri.getQueryParameter(key)?.let { params[key] = it }
+        }
+        val fragment = uri.fragment.orEmpty()
+        if (fragment.isNotBlank()) {
+            fragment.split("&").forEach { pair ->
+                val idx = pair.indexOf('=')
+                if (idx > 0) {
+                    val key = URLDecoder.decode(pair.substring(0, idx), "UTF-8")
+                    val value = URLDecoder.decode(pair.substring(idx + 1), "UTF-8")
+                    params[key] = value
+                }
+            }
+        }
+
+        val errorDesc = params["error_description"] ?: params["error"]
+        if (!errorDesc.isNullOrBlank()) {
+            showError("Google Sign-In failed: $errorDesc")
+            return
+        }
+
+        val accessToken = params["access_token"]
+        if (accessToken.isNullOrBlank()) {
+            showError("Google Sign-In did not return a session token. Verify Supabase Redirect URL includes autotubestudio://oauth/supabase.")
+            return
+        }
+
+        val refreshToken = params["refresh_token"].orEmpty()
+        val expiresIn = params["expires_in"]?.toLongOrNull() ?: 3600L
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true) }
+            repository.completeSupabaseOAuthSession(accessToken, refreshToken, expiresIn)
+                .onSuccess {
+                    _uiState.update { it.copy(isLoading = false) }
+                    showInfo("Signed in with Google")
+                }
+                .onFailure { err ->
+                    _uiState.update { it.copy(isLoading = false) }
+                    showError(err.message ?: "Could not complete Google Sign-In")
+                }
+        }
+    }
+
+    fun signInWithGoogleIdToken(
+        idToken: String,
+        backendUrl: String,
+        supabaseUrl: String,
+        supabaseAnonKey: String,
+        googleWebClientId: String
+    ) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true) }
+            repository.signInWithGoogleIdToken(
+                idToken = idToken,
+                backendUrl = backendUrl,
+                supabaseUrl = supabaseUrl,
+                supabaseAnonKey = supabaseAnonKey,
+                googleWebClientId = googleWebClientId
+            ).onSuccess {
+                _uiState.update { it.copy(isLoading = false) }
+                showInfo("Signed in with Google One-Tap")
+            }.onFailure { err ->
+                _uiState.update { it.copy(isLoading = false) }
+                showError(err.message ?: "Google One-Tap sign-in failed")
+            }
+        }
+    }
+
+    fun launchSupabaseGoogleOAuth(
+        backendUrl: String,
+        supabaseUrl: String,
+        supabaseAnonKey: String,
+        googleWebClientId: String
+    ) {
+        viewModelScope.launch {
+            repository.buildSupabaseGoogleOAuthUrl(
+                backendUrl = backendUrl,
+                supabaseUrl = supabaseUrl,
+                supabaseAnonKey = supabaseAnonKey,
+                googleWebClientId = googleWebClientId
+            ).onSuccess { url ->
+                _uiState.update { it.copy(pendingOAuthUrl = url) }
+            }.onFailure { err ->
+                showError(err.message ?: "Could not launch Google Sign-In")
+            }
         }
     }
 

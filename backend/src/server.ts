@@ -4,6 +4,10 @@ import helmet from 'helmet';
 import { config, sanitizeErrorMessage } from './config/env.js';
 import { apiRateLimiter } from './middleware/auth.js';
 import { apiRouter } from './routes/apiRoutes.js';
+import { runSchedulerTick } from './scheduler.js';
+import { startWorkerLoop } from './worker.js';
+
+const embeddedWorkerEnabled = process.env.EMBEDDED_WORKER_ENABLED !== 'false';
 
 export function createApp() {
   const app = express();
@@ -40,6 +44,7 @@ export function createApp() {
       supabaseConfigured: Boolean(config.supabaseUrl && config.supabaseServiceRoleKey),
       encryptionConfigured: Boolean(config.credentialEncryptionKeyHex),
       youtubeOAuthConfigured: Boolean(config.googleClientId && config.googleClientSecret),
+      embeddedWorkerEnabled,
     });
   });
 
@@ -58,12 +63,28 @@ const isMainModule =
 
 if (isMainModule) {
   const app = createApp();
+  let workerHandle: { stop: () => void } | null = null;
+  let schedulerTimer: NodeJS.Timeout | null = null;
+
   const server = app.listen(config.port, () => {
-    console.log(`[AutoTube API] Listening on port ${config.port} (${config.nodeEnv})`);
+    console.log(
+      `[AutoTube API] Listening on port ${config.port} (${config.nodeEnv}, embeddedWorker=${embeddedWorkerEnabled})`
+    );
+    if (embeddedWorkerEnabled) {
+      workerHandle = startWorkerLoop();
+      schedulerTimer = setInterval(() => {
+        if (!config.supabaseUrl || !config.supabaseServiceRoleKey) return;
+        runSchedulerTick().catch((err) => {
+          console.error(`[AutoTube Embedded Scheduler] Tick error: ${sanitizeErrorMessage(err)}`);
+        });
+      }, 5 * 60 * 1000);
+    }
   });
 
   const shutdown = () => {
     console.log('[AutoTube API] Shutting down gracefully...');
+    workerHandle?.stop();
+    if (schedulerTimer) clearInterval(schedulerTimer);
     server.close(() => process.exit(0));
   };
   process.on('SIGTERM', shutdown);

@@ -1,6 +1,7 @@
 package com.example.core.network
 
 import retrofit2.http.Body
+import retrofit2.http.GET
 import retrofit2.http.Header
 import retrofit2.http.POST
 
@@ -9,6 +10,12 @@ interface SupabaseAuthApi {
     suspend fun signInWithPassword(
         @Header("apikey") anonKey: String,
         @Body body: SupabaseAuthRequest
+    ): SupabaseAuthResponse
+
+    @POST("auth/v1/token?grant_type=id_token")
+    suspend fun signInWithIdToken(
+        @Header("apikey") anonKey: String,
+        @Body body: SupabaseIdTokenRequest
     ): SupabaseAuthResponse
 
     @POST("auth/v1/signup")
@@ -22,4 +29,10 @@ interface SupabaseAuthApi {
         @Header("apikey") anonKey: String,
         @Body body: SupabaseRefreshRequest
     ): SupabaseAuthResponse
+
+    @GET("auth/v1/user")
+    suspend fun getCurrentUser(
+        @Header("apikey") anonKey: String,
+        @Header("Authorization") bearerToken: String
+    ): SupabaseAuthUser
 }

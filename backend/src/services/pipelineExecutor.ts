@@ -648,6 +648,74 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
     let finalJobStatus: 'published' | 'scheduled' = 'published';
     let finalMessage = 'Video rendered and saved to Studio Library';
 
+    const autoCleanupStorage = process.env.AUTO_CLEANUP_STORAGE_AFTER_UPLOAD !== 'false';
+
+    // Helper to remove heavy files from Supabase Storage so free/pro buckets never fill up
+    const purgeProjectStorage = async (includeFinalVideo: boolean) => {
+      try {
+        const { data: assets } = await supabase
+          .from('media_assets')
+          .select('storage_path')
+          .eq('project_id', project.id)
+          .eq('user_id', job.user_id)
+          .not('storage_path', 'is', null);
+
+        const sourcePaths = (assets || [])
+          .map((a) => a.storage_path as string)
+          .filter(Boolean);
+        if (sourcePaths.length > 0) {
+          await supabase.storage.from('source-media').remove(sourcePaths).catch(() => undefined);
+          await supabase
+            .from('media_assets')
+            .update({ storage_path: null })
+            .eq('project_id', project.id)
+            .eq('user_id', job.user_id);
+        }
+
+        const { data: latestProj } = await supabase
+          .from('projects')
+          .select('narration_audio_path, subtitle_srt_path, final_video_storage_path')
+          .eq('id', project.id)
+          .maybeSingle();
+
+        if (latestProj?.narration_audio_path) {
+          await supabase.storage
+            .from('voice-audio')
+            .remove([latestProj.narration_audio_path])
+            .catch(() => undefined);
+        }
+
+        const projectUpdates: Record<string, unknown> = {
+          narration_audio_path: null,
+        };
+
+        if (includeFinalVideo) {
+          if (latestProj?.final_video_storage_path) {
+            await supabase.storage
+              .from('rendered-videos')
+              .remove([latestProj.final_video_storage_path])
+              .catch(() => undefined);
+          }
+          if (latestProj?.subtitle_srt_path) {
+            await supabase.storage
+              .from('subtitles')
+              .remove([latestProj.subtitle_srt_path])
+              .catch(() => undefined);
+          }
+          projectUpdates.final_video_storage_path = null;
+          projectUpdates.subtitle_srt_path = null;
+        }
+
+        await supabase
+          .from('projects')
+          .update(projectUpdates)
+          .eq('id', project.id)
+          .eq('user_id', job.user_id);
+      } catch (cleanupErr) {
+        console.warn(`[AutoTube Cleanup] Non-fatal storage cleanup warning: ${sanitizeErrorMessage(cleanupErr)}`);
+      }
+    };
+
     if (uploadCfg.auto_upload) {
       await updateJobStage(job.id, project.id, 'uploading', 95, 'Uploading video via YouTube Data API v3', completedStages);
       await recordNotification({
@@ -693,6 +761,11 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
           ? `Scheduled on YouTube: ${uploaded.videoUrl}`
           : `Published on YouTube: ${uploaded.videoUrl}`;
 
+      // Zero-bloat mode: delete heavy MP4, clips, audio, and SRT from cloud storage once on YouTube
+      if (autoCleanupStorage) {
+        await purgeProjectStorage(true);
+      }
+
       await recordNotification({
         userId: job.user_id,
         projectId: project.id,
@@ -701,6 +774,9 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
         title: uploaded.status === 'scheduled' ? 'Video scheduled on YouTube' : 'Video published on YouTube',
         body: finalMessage,
       });
+    } else if (autoCleanupStorage) {
+      // Even in manual preview mode, remove heavy intermediate stock clips & raw voice audio right away
+      await purgeProjectStorage(false);
     }
 
     await supabase

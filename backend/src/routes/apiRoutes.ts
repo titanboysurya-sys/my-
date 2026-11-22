@@ -32,6 +32,53 @@ export const apiRouter = Router();
 
 const providerEnum = z.enum(['gemini', 'openai_compatible', 'elevenlabs', 'pexels', 'pixabay']);
 
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function renderOAuthHandoffHtml(params: {
+  success: boolean;
+  headline: string;
+  detail: string;
+  appDeepLink: string;
+}): string {
+  const safeDeepLink = escapeHtml(params.appDeepLink);
+  const accent = params.success ? '#10B981' : '#EF4444';
+  const badge = params.success ? 'CONNECTED' : 'ERROR';
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="refresh" content="1;url=${safeDeepLink}" />
+  <title>AutoTube Studio — YouTube OAuth</title>
+  <style>
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0B0D12; color: #F8FAFC; display: flex; min-height: 100vh; align-items: center; justify-content: center; padding: 20px; }
+    .card { max-width: 420px; width: 100%; background: #141923; border: 1px solid #263143; border-radius: 16px; padding: 28px 24px; text-align: center; }
+    .badge { display: inline-block; padding: 4px 12px; border-radius: 999px; font-size: 12px; font-weight: 700; letter-spacing: 0.08em; background: ${accent}22; color: ${accent}; border: 1px solid ${accent}66; }
+    h1 { font-size: 20px; margin: 16px 0 8px; }
+    p { font-size: 14px; color: #94A3B8; line-height: 1.5; margin: 0 0 22px; word-break: break-word; }
+    a.btn { display: block; background: #FF3B5C; color: #FFFFFF; text-decoration: none; font-weight: 600; padding: 14px 18px; border-radius: 12px; font-size: 15px; }
+    .hint { font-size: 12px; color: #64748B; margin-top: 14px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <span class="badge">${badge}</span>
+    <h1>${escapeHtml(params.headline)}</h1>
+    <p>${escapeHtml(params.detail)}</p>
+    <a class="btn" href="${safeDeepLink}">Return to AutoTube Studio</a>
+    <div class="hint">If the app does not reopen automatically, tap the button above or close this tab.</div>
+  </div>
+</body>
+</html>`;
+}
+
 // ============================================================================
 // PUBLIC OAUTH CALLBACK (Verified via HMAC-SHA256 signed state parameter)
 // ============================================================================
@@ -42,24 +89,51 @@ apiRouter.get('/youtube/oauth/callback', async (req, res) => {
     const oauthError = String(req.query.error || '');
 
     if (oauthError) {
-      res.redirect(
-        `${config.androidOAuthCallbackUri}?status=error&message=${encodeURIComponent(oauthError)}`
+      const deepLink = `${config.androidOAuthCallbackUri}?status=error&message=${encodeURIComponent(oauthError)}`;
+      res.status(200).type('html').send(
+        renderOAuthHandoffHtml({
+          success: false,
+          headline: 'YouTube Authorization Cancelled',
+          detail: oauthError,
+          appDeepLink: deepLink,
+        })
       );
       return;
     }
     if (!code || !state) {
-      res.status(400).send('Missing OAuth code or state parameter.');
+      res.status(400).type('html').send(
+        renderOAuthHandoffHtml({
+          success: false,
+          headline: 'Invalid OAuth Callback',
+          detail: 'Missing authorization code or state parameter.',
+          appDeepLink: `${config.androidOAuthCallbackUri}?status=error&message=Missing+code+or+state`,
+        })
+      );
       return;
     }
 
     const result = await handleYouTubeOAuthCallback(code, state);
     const primaryName = result.channels[0]?.channelName || 'YouTube Channel';
-    res.redirect(
-      `${config.androidOAuthCallbackUri}?status=connected&channel=${encodeURIComponent(primaryName)}`
+    const deepLink = `${config.androidOAuthCallbackUri}?status=connected&channel=${encodeURIComponent(primaryName)}`;
+    res.status(200).type('html').send(
+      renderOAuthHandoffHtml({
+        success: true,
+        headline: 'YouTube Channel Connected!',
+        detail: `${primaryName} is now linked to AutoTube Studio for automated cloud uploads.`,
+        appDeepLink: deepLink,
+      })
     );
   } catch (err) {
     const msg = sanitizeErrorMessage(err);
-    res.redirect(`${config.androidOAuthCallbackUri}?status=error&message=${encodeURIComponent(msg)}`);
+    const deepLink = `${config.androidOAuthCallbackUri}?status=error&message=${encodeURIComponent(msg)}`;
+    res.status(200).type('html').send(
+      renderOAuthHandoffHtml({
+        success: false,
+        headline: 'Could Not Connect YouTube Channel',
+        detail: msg,
+        appDeepLink: deepLink,
+      })
+    );
   }
 });
 

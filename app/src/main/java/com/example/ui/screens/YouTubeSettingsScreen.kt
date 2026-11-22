@@ -20,12 +20,14 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.LinkOff
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.SmartDisplay
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -39,7 +41,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import coil.compose.AsyncImage
 import com.example.R
 import com.example.core.database.CachedYouTubeChannelEntity
@@ -53,12 +57,19 @@ fun YouTubeSettingsScreen(
     channels: List<CachedYouTubeChannelEntity>,
     isLoading: Boolean,
     onRefresh: () -> Unit,
+    onManualRefresh: () -> Unit = onRefresh,
     onConnectYouTube: () -> Unit,
     onDisconnectYouTube: (String?) -> Unit,
     onBack: () -> Unit
 ) {
     LaunchedEffect(Unit) {
         onRefresh()
+    }
+
+    // Re-sync connected channels whenever returning from the OAuth browser tab
+    LifecycleResumeEffect(Unit) {
+        onRefresh()
+        onPauseOrDispose {}
     }
 
     LazyColumn(
@@ -83,6 +94,12 @@ fun YouTubeSettingsScreen(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                }
+                IconButton(
+                    onClick = onManualRefresh,
+                    modifier = Modifier.testTag("youtube_refresh_button")
+                ) {
+                    Icon(Icons.Rounded.Refresh, contentDescription = stringResource(R.string.cd_refresh))
                 }
             }
         }
@@ -118,9 +135,19 @@ fun YouTubeSettingsScreen(
                             .testTag("youtube_connect_button"),
                         colors = ButtonDefaults.buttonColors(containerColor = SignalCrimson)
                     ) {
-                        Icon(Icons.Rounded.SmartDisplay, contentDescription = null)
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(if (channels.isEmpty()) "Connect YouTube Channel" else "Reconnect / Add Channel")
+                        if (isLoading) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.onPrimary
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text("Opening Google OAuth…")
+                        } else {
+                            Icon(Icons.Rounded.SmartDisplay, contentDescription = null)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(if (channels.isEmpty()) "Connect YouTube Channel" else "Reconnect / Add Channel")
+                        }
                     }
                 }
             }
@@ -142,9 +169,10 @@ fun YouTubeSettingsScreen(
                         Text("No YouTube channel connected", style = MaterialTheme.typography.titleMedium)
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            text = "Tap Connect YouTube Channel above to open Google OAuth 2.0 in a secure Custom Tab.",
+                            text = "Tap Connect YouTube Channel above to authorize your Google/Brand channel in a secure browser tab. After approving, tap Return to AutoTube Studio or tap Refresh above.",
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center
                         )
                     }
                 }

@@ -151,12 +151,27 @@ private fun AutoTubeStudioRoot(viewModel: StudioViewModel) {
     val channels by viewModel.youtubeChannels.collectAsStateWithLifecycle()
     val notifications by viewModel.notifications.collectAsStateWithLifecycle()
 
-    // Launch Google OAuth 2.0 in AndroidX Custom Tabs when backend returns consent URL
+    // Launch Google OAuth 2.0 in AndroidX Custom Tabs (with default browser fallback)
     LaunchedEffect(uiState.pendingOAuthUrl) {
         val url = uiState.pendingOAuthUrl ?: return@LaunchedEffect
         viewModel.consumePendingOAuthUrl()
-        runCatching {
-            CustomTabsIntent.Builder().build().launchUrl(context, Uri.parse(url))
+        val uri = Uri.parse(url)
+        val launchedCustomTab = runCatching {
+            CustomTabsIntent.Builder().build().launchUrl(context, uri)
+        }.isSuccess
+        if (!launchedCustomTab) {
+            val launchedBrowser = runCatching {
+                context.startActivity(
+                    Intent(Intent.ACTION_VIEW, uri).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                )
+            }.isSuccess
+            if (!launchedBrowser) {
+                viewModel.reportExternalError(
+                    "Could not open a browser for Google sign-in. Ensure Chrome or a web browser is installed."
+                )
+            }
         }
     }
 
@@ -375,7 +390,8 @@ private fun AutoTubeStudioRoot(viewModel: StudioViewModel) {
                                 YouTubeSettingsScreen(
                                     channels = channels,
                                     isLoading = uiState.isLoading,
-                                    onRefresh = viewModel::refreshYouTubeAccounts,
+                                    onRefresh = { viewModel.refreshYouTubeAccounts(showFeedback = false) },
+                                    onManualRefresh = { viewModel.refreshYouTubeAccounts(showFeedback = true) },
                                     onConnectYouTube = viewModel::initiateYouTubeConnect,
                                     onDisconnectYouTube = viewModel::disconnectYouTube,
                                     onBack = { navController.popBackStack() }

@@ -28,7 +28,7 @@ export interface YouTubeChannelSummary {
 export function buildYouTubeOAuthConsentUrl(userId: string): string {
   if (!config.googleClientId || !config.youtubeOAuthRedirectUri) {
     throw new Error(
-      'Google OAuth is not configured on the backend. Set GOOGLE_CLIENT_ID and YOUTUBE_OAUTH_REDIRECT_URI.'
+      'Google OAuth is not configured on the backend. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and YOUTUBE_OAUTH_REDIRECT_URI on Render.'
     );
   }
 
@@ -39,7 +39,7 @@ export function buildYouTubeOAuthConsentUrl(userId: string): string {
   url.searchParams.set('response_type', 'code');
   url.searchParams.set('scope', YOUTUBE_SCOPES.join(' '));
   url.searchParams.set('access_type', 'offline');
-  url.searchParams.set('prompt', 'consent');
+  url.searchParams.set('prompt', 'select_account consent');
   url.searchParams.set('include_granted_scopes', 'true');
   url.searchParams.set('state', state);
   return url.toString();
@@ -51,6 +51,12 @@ export async function handleYouTubeOAuthCallback(
 ): Promise<{ userId: string; channels: YouTubeChannelSummary[] }> {
   const verified = verifySignedOAuthState(state, config.oauthStateSecret);
   const userId = verified.userId;
+
+  if (!config.googleClientId || !config.googleClientSecret || !config.youtubeOAuthRedirectUri) {
+    throw new Error(
+      'Missing GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, or YOUTUBE_OAUTH_REDIRECT_URI on backend.'
+    );
+  }
 
   const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
@@ -78,11 +84,6 @@ export async function handleYouTubeOAuthCallback(
   if (!tokenData.access_token) {
     throw new Error('Google OAuth response missing access_token.');
   }
-  if (!tokenData.refresh_token) {
-    throw new Error(
-      'Google did not return a refresh token. Please revoke previous access or re-authorize with consent.'
-    );
-  }
 
   // Fetch user's YouTube channels via YouTube Data API v3
   const chanRes = await fetch(
@@ -91,7 +92,10 @@ export async function handleYouTubeOAuthCallback(
   );
 
   if (!chanRes.ok) {
-    throw new Error(`YouTube channel lookup failed (HTTP ${chanRes.status}).`);
+    const chanErrBody = await chanRes.text().catch(() => '');
+    throw new Error(
+      `YouTube channel lookup failed (HTTP ${chanRes.status}): ${sanitizeErrorMessage(chanErrBody)}`
+    );
   }
 
   const chanPayload = (await chanRes.json()) as {
@@ -108,7 +112,9 @@ export async function handleYouTubeOAuthCallback(
 
   const items = chanPayload.items || [];
   if (items.length === 0) {
-    throw new Error('No YouTube channel found on this Google account.');
+    throw new Error(
+      'No YouTube channel found on this Google account. Open YouTube.com with this account, create a channel, and try connecting again.'
+    );
   }
 
   const supabase = getSupabaseAdmin();
@@ -116,11 +122,34 @@ export async function handleYouTubeOAuthCallback(
 
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
-    const encrypted = encryptSecret(
-      tokenData.refresh_token,
-      config.credentialEncryptionKeyHex,
-      `${userId}:youtube:${item.id}`
-    );
+
+    // If reconnecting and Google did not reissue refresh_token, reuse existing stored token if present
+    let encryptedPayload: { ciphertext: string; iv: string; authTag: string };
+    if (tokenData.refresh_token) {
+      encryptedPayload = encryptSecret(
+        tokenData.refresh_token,
+        config.credentialEncryptionKeyHex,
+        `${userId}:youtube:${item.id}`
+      );
+    } else {
+      const { data: existing } = await supabase
+        .from('youtube_accounts')
+        .select('encrypted_refresh_token, token_iv, token_auth_tag')
+        .eq('user_id', userId)
+        .eq('channel_id', item.id)
+        .maybeSingle();
+
+      if (!existing?.encrypted_refresh_token) {
+        throw new Error(
+          'Google did not return a refresh token. Go to myaccount.google.com/permissions, remove this app, and reconnect to grant offline upload permission.'
+        );
+      }
+      encryptedPayload = {
+        ciphertext: existing.encrypted_refresh_token,
+        iv: existing.token_iv,
+        authTag: existing.token_auth_tag,
+      };
+    }
 
     const { data, error } = await supabase
       .from('youtube_accounts')
@@ -133,9 +162,9 @@ export async function handleYouTubeOAuthCallback(
           channel_thumbnail_url:
             item.snippet?.thumbnails?.medium?.url || item.snippet?.thumbnails?.default?.url || null,
           subscriber_count: Number(item.statistics?.subscriberCount || 0),
-          encrypted_refresh_token: encrypted.ciphertext,
-          token_iv: encrypted.iv,
-          token_auth_tag: encrypted.authTag,
+          encrypted_refresh_token: encryptedPayload.ciphertext,
+          token_iv: encryptedPayload.iv,
+          token_auth_tag: encryptedPayload.authTag,
           scopes: YOUTUBE_SCOPES,
           token_status: 'connected',
           is_default: i === 0,

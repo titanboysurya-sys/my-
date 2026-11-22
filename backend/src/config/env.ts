@@ -40,18 +40,23 @@ export function loadConfig(): AppConfig {
     ? originsRaw.split(',').map((s) => s.trim()).filter(Boolean)
     : [];
 
+  const renderExternalUrl = process.env.RENDER_EXTERNAL_URL?.trim().replace(/\/+$/, '') || '';
+  const rawRedirectUri =
+    process.env.YOUTUBE_OAUTH_REDIRECT_URI?.trim() ||
+    (renderExternalUrl ? `${renderExternalUrl}/api/youtube/oauth/callback` : '');
+
   return {
     nodeEnv: process.env.NODE_ENV || 'development',
     port: Number(process.env.PORT || 8080),
     corsAllowedOrigins,
-    supabaseUrl: process.env.SUPABASE_URL?.trim() || '',
+    supabaseUrl: process.env.SUPABASE_URL?.trim().replace(/\/+$/, '') || '',
     supabaseAnonKey: process.env.SUPABASE_ANON_KEY?.trim() || '',
     supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() || '',
     credentialEncryptionKeyHex: encryptionKey,
     oauthStateSecret: encryptionKey || ephemeralFallbackSecret,
     googleClientId: process.env.GOOGLE_CLIENT_ID?.trim() || '',
     googleClientSecret: process.env.GOOGLE_CLIENT_SECRET?.trim() || '',
-    youtubeOAuthRedirectUri: process.env.YOUTUBE_OAUTH_REDIRECT_URI?.trim() || '',
+    youtubeOAuthRedirectUri: rawRedirectUri.replace(/\/+$/, ''),
     androidOAuthCallbackUri:
       process.env.ANDROID_OAUTH_CALLBACK_URI?.trim() || 'autotubestudio://oauth/youtube',
     optionalPlatformKeys: {

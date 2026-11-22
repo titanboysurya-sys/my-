@@ -585,9 +585,23 @@ class StudioViewModel(
         }
     }
 
-    fun refreshYouTubeAccounts() {
+    fun reportExternalError(message: String) {
+        showError(message)
+    }
+
+    fun refreshYouTubeAccounts(showFeedback: Boolean = false) {
         viewModelScope.launch {
             repository.refreshYouTubeAccounts()
+                .onSuccess {
+                    if (showFeedback) {
+                        showInfo("YouTube channel list synced from server")
+                    }
+                }
+                .onFailure { err ->
+                    if (showFeedback) {
+                        showError(err.message ?: "Failed to refresh YouTube channels")
+                    }
+                }
         }
     }
 

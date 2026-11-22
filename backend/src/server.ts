@@ -4,6 +4,7 @@ import helmet from 'helmet';
 import { config, sanitizeErrorMessage } from './config/env.js';
 import { apiRateLimiter } from './middleware/auth.js';
 import { apiRouter } from './routes/apiRoutes.js';
+import { publicPagesRouter } from './routes/publicPages.js';
 import { runSchedulerTick } from './scheduler.js';
 import { startWorkerLoop } from './worker.js';
 
@@ -35,6 +36,8 @@ export function createApp() {
 
   app.use(express.json({ limit: '2mb' }));
   app.use(apiRateLimiter);
+
+  app.use('/', publicPagesRouter);
 
   app.get('/health', (_req: Request, res: Response) => {
     res.json({

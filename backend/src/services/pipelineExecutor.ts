@@ -338,12 +338,15 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
       candidate: ScoredMediaCandidate;
     }> = [];
 
+    const alreadySearched = shouldSkipStage(completedStages, 'searching_media');
     await updateJobStage(
       job.id,
       project.id,
-      'searching_media',
-      38,
-      'Searching relevant stock footage across Pexels & Pixabay',
+      alreadySearched ? 'preparing_timeline' : 'searching_media',
+      alreadySearched ? 66 : 38,
+      alreadySearched
+        ? 'Restoring cached media clips for rendering'
+        : 'Searching relevant stock footage across Pexels & Pixabay',
       completedStages
     );
 

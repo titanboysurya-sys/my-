@@ -30,6 +30,7 @@ USER worker
 ENV NODE_ENV=production
 ENV PORT=8080
 ENV TEMP_WORK_DIR=/tmp/autotube-worker
+ENV NODE_OPTIONS="--max-old-space-size=220"
 
 EXPOSE 8080
 

@@ -155,6 +155,7 @@ class StudioViewModel(
 
     fun signInWithGoogleIdToken(
         idToken: String,
+        nonce: String?,
         backendUrl: String,
         supabaseUrl: String,
         supabaseAnonKey: String,
@@ -164,6 +165,7 @@ class StudioViewModel(
             _uiState.update { it.copy(isLoading = true) }
             repository.signInWithGoogleIdToken(
                 idToken = idToken,
+                nonce = nonce,
                 backendUrl = backendUrl,
                 supabaseUrl = supabaseUrl,
                 supabaseAnonKey = supabaseAnonKey,

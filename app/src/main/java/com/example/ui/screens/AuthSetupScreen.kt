@@ -69,6 +69,9 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import androidx.credentials.CredentialManager
 import androidx.credentials.CustomCredential
 import androidx.credentials.GetCredentialRequest
@@ -79,9 +82,28 @@ import com.example.ui.theme.PipelineCyan
 import com.example.ui.theme.SignalCrimson
 import com.example.ui.theme.StudioEmerald
 import com.example.ui.viewmodel.StudioUiState
+import com.google.android.libraries.identity.googleid.GetGoogleIdOption
 import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
 import kotlinx.coroutines.launch
+import java.security.MessageDigest
+import java.util.UUID
+
+private fun Context.findActivity(): Activity? {
+    var current: Context? = this
+    while (current is ContextWrapper) {
+        if (current is Activity) return current
+        current = current.baseContext
+    }
+    return null
+}
+
+private fun generateGoogleNoncePair(): Pair<String, String> {
+    val rawNonce = UUID.randomUUID().toString()
+    val digest = MessageDigest.getInstance("SHA-256").digest(rawNonce.toByteArray())
+    val hashedNonce = digest.joinToString("") { "%02x".format(it) }
+    return rawNonce to hashedNonce
+}
 
 @Composable
 fun AuthSetupScreen(
@@ -90,6 +112,7 @@ fun AuthSetupScreen(
     onCheckHealth: (String) -> Unit,
     onSignInWithGoogleIdToken: (
         idToken: String,
+        nonce: String?,
         backendUrl: String,
         supabaseUrl: String,
         anonKey: String,
@@ -210,32 +233,62 @@ fun AuthSetupScreen(
                     Button(
                         onClick = {
                             val trimmedClientId = googleWebClientId.trim()
-                            if (trimmedClientId.isNotBlank()) {
+                            val activity = context.findActivity()
+                            if (trimmedClientId.isNotBlank() && activity != null) {
                                 scope.launch {
                                     try {
-                                        val credentialManager = CredentialManager.create(context)
-                                        val googleOption = GetSignInWithGoogleOption.Builder(trimmedClientId)
-                                            .build()
-                                        val request = GetCredentialRequest.Builder()
-                                            .addCredentialOption(googleOption)
-                                            .build()
-                                        val result = credentialManager.getCredential(
-                                            context = context,
-                                            request = request
-                                        )
-                                        val credential = result.credential
+                                        val (rawNonce, hashedNonce) = generateGoogleNoncePair()
+                                        val credentialManager = CredentialManager.create(activity)
+                                        val result = try {
+                                            // 1) Try native Sign in with Google bottom sheet (with SHA-256 nonce)
+                                            val signInOption = GetSignInWithGoogleOption.Builder(trimmedClientId)
+                                                .setNonce(hashedNonce)
+                                                .build()
+                                            credentialManager.getCredential(
+                                                context = activity,
+                                                request = GetCredentialRequest.Builder()
+                                                    .addCredentialOption(signInOption)
+                                                    .build()
+                                            )
+                                        } catch (cancel: GetCredentialCancellationException) {
+                                            throw cancel
+                                        } catch (_: Exception) {
+                                            // 2) Try Google One-Tap GetGoogleIdOption fallback
+                                            try {
+                                                val oneTapOption = GetGoogleIdOption.Builder()
+                                                    .setFilterByAuthorizedAccounts(false)
+                                                    .setServerClientId(trimmedClientId)
+                                                    .setAutoSelectEnabled(false)
+                                                    .setNonce(hashedNonce)
+                                                    .build()
+                                                credentialManager.getCredential(
+                                                    context = activity,
+                                                    request = GetCredentialRequest.Builder()
+                                                        .addCredentialOption(oneTapOption)
+                                                        .build()
+                                                )
+                                            } catch (cancel: GetCredentialCancellationException) {
+                                                throw cancel
+                                            } catch (_: Exception) {
+                                                null
+                                            }
+                                        }
+
+                                        val credential = result?.credential
                                         if (credential is CustomCredential &&
                                             credential.type == GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL
                                         ) {
                                             val googleCred = GoogleIdTokenCredential.createFrom(credential.data)
                                             onSignInWithGoogleIdToken(
                                                 googleCred.idToken,
+                                                rawNonce,
                                                 backendUrl,
                                                 supabaseUrl,
                                                 supabaseAnonKey,
                                                 trimmedClientId
                                             )
                                         } else {
+                                            // 3) Seamless Chrome Custom Tabs Google OAuth fallback
                                             onLaunchGoogleBrowserSignIn(
                                                 backendUrl,
                                                 supabaseUrl,
@@ -244,15 +297,7 @@ fun AuthSetupScreen(
                                             )
                                         }
                                     } catch (_: GetCredentialCancellationException) {
-                                        // User dismissed One-Tap sheet intentionally
-                                    } catch (_: Exception) {
-                                        // Fallback seamlessly to Chrome Custom Tabs Google OAuth
-                                        onLaunchGoogleBrowserSignIn(
-                                            backendUrl,
-                                            supabaseUrl,
-                                            supabaseAnonKey,
-                                            trimmedClientId
-                                        )
+                                        // User intentionally dismissed the Google One-Tap sheet
                                     }
                                 }
                             } else {
@@ -294,6 +339,27 @@ fun AuthSetupScreen(
                             text = "Continue with Google (One-Tap)",
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.SemiBold
+                        )
+                    }
+
+                    TextButton(
+                        onClick = {
+                            onLaunchGoogleBrowserSignIn(
+                                backendUrl,
+                                supabaseUrl,
+                                supabaseAnonKey,
+                                googleWebClientId.trim()
+                            )
+                        },
+                        enabled = !uiState.isLoading,
+                        modifier = Modifier
+                            .align(Alignment.CenterHorizontally)
+                            .testTag("auth_google_browser_fallback_button")
+                    ) {
+                        Text(
+                            text = "Having trouble with One-Tap? Sign in via Google Browser",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = PipelineCyan
                         )
                     }
 

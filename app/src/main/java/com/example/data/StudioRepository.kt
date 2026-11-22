@@ -144,6 +144,7 @@ class StudioRepository(
 
     suspend fun signInWithGoogleIdToken(
         idToken: String,
+        nonce: String? = null,
         backendUrl: String,
         supabaseUrl: String,
         supabaseAnonKey: String,
@@ -154,7 +155,11 @@ class StudioRepository(
 
         val res = client.supabaseAuthApi(supabaseUrl).signInWithIdToken(
             anonKey = supabaseAnonKey.trim(),
-            body = SupabaseIdTokenRequest(provider = "google", idToken = idToken)
+            body = SupabaseIdTokenRequest(
+                provider = "google",
+                idToken = idToken,
+                nonce = nonce?.takeIf { it.isNotBlank() }
+            )
         )
         val accessToken = res.accessToken
             ?: throw IllegalStateException("Supabase did not return an access token for Google Sign-In.")
@@ -548,19 +553,50 @@ class StudioRepository(
         updatedAt = updatedAt
     )
 
+    private fun extractReadableHttpError(rawBody: String?, statusCode: Int): String? {
+        val trimmed = rawBody?.trim().orEmpty()
+        if (trimmed.isBlank()) return null
+        // Never dump raw HTML gateway pages (e.g. Render 502/503 HTML) into the UI banner
+        if (trimmed.startsWith("<!DOCTYPE", ignoreCase = true) ||
+            trimmed.startsWith("<html", ignoreCase = true) ||
+            trimmed.contains("<head>", ignoreCase = true)
+        ) {
+            return when (statusCode) {
+                502, 503, 504 ->
+                    "Cloud server is restarting or temporarily busy (HTTP $statusCode). Wait 15 seconds and tap Refresh."
+                else -> "Cloud server returned an unexpected response (HTTP $statusCode). Please retry."
+            }
+        }
+        // Extract JSON error/msg/error_description from Supabase or Express JSON payloads
+        val jsonPatterns = listOf(
+            Regex("\"error_description\"\\s*:\\s*\"([^\"]+)\""),
+            Regex("\"msg\"\\s*:\\s*\"([^\"]+)\""),
+            Regex("\"message\"\\s*:\\s*\"([^\"]+)\""),
+            Regex("\"error\"\\s*:\\s*\"([^\"]+)\"")
+        )
+        for (pattern in jsonPatterns) {
+            val match = pattern.find(trimmed)?.groupValues?.getOrNull(1)
+            if (!match.isNullOrBlank()) return match
+        }
+        return trimmed.take(220)
+    }
+
     private suspend fun <T> safeApiCall(block: suspend () -> T): Result<T> =
         withContext(Dispatchers.IO) {
             try {
                 Result.success(block())
             } catch (e: HttpException) {
-                val errBody = e.response()?.errorBody()?.string()?.take(240)
+                val rawErr = e.response()?.errorBody()?.string()?.take(500)
+                val parsed = extractReadableHttpError(rawErr, e.code())
                 val friendly = when (e.code()) {
-                    401 -> "Session expired or unauthorized. Please sign in again."
-                    403 -> "Access denied or provider permission error."
-                    404 -> "Resource not found on backend."
-                    422 -> errBody ?: "Validation failed — check your input or API key."
+                    401 -> parsed ?: "Session expired or unauthorized. Please sign in again."
+                    403 -> parsed ?: "Access denied or provider permission error."
+                    404 -> parsed ?: "Resource not found on backend."
+                    422 -> parsed ?: "Validation failed — check your input or API key."
                     429 -> "Rate limit reached. Please retry in a moment."
-                    else -> errBody ?: "Server error (HTTP ${e.code()})."
+                    502, 503, 504 ->
+                        "Cloud server is restarting or temporarily busy (HTTP ${e.code()}). Wait 15 seconds and tap Refresh."
+                    else -> parsed ?: "Server error (HTTP ${e.code()})."
                 }
                 Result.failure(Exception(friendly))
             } catch (e: IOException) {

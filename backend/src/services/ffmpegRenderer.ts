@@ -108,6 +108,13 @@ function formatSrtTime(totalSec: number): string {
   ).padStart(2, '0')},${String(Math.min(999, ms)).padStart(3, '0')}`;
 }
 
+function isLowMemoryRenderEnv(): boolean {
+  if (process.env.HIGH_MEMORY_WORKER === 'true') return false;
+  if (process.env.LOW_MEMORY_RENDER === 'true') return true;
+  // Render Free / Starter web containers default to 512 MB RAM
+  return process.env.RENDER === 'true';
+}
+
 /**
  * Renders the complete video using FFmpeg via execFile (never shell interpolation):
  * 1. Normalizes each clip (or applies Ken Burns zoompan to fallback images)
@@ -118,8 +125,17 @@ function formatSrtTime(totalSec: number): string {
 export async function renderVideoWithFfmpeg(
   req: RenderVideoRequest
 ): Promise<RenderVideoOutput> {
-  const { width, height } = resolveOutputDimensions(req.format, req.qualityPreset);
-  const fps = 30;
+  const lowMem = isLowMemoryRenderEnv();
+  const effectiveQuality: '720p' | '1080p' = lowMem ? '720p' : req.qualityPreset;
+  const { width, height } = resolveOutputDimensions(req.format, effectiveQuality);
+  const fps = lowMem ? 24 : 30;
+  const x264Preset = lowMem ? 'ultrafast' : 'veryfast';
+  const threadFlags = lowMem
+    ? ['-threads', '1', '-filter_threads', '1', '-filter_complex_threads', '1']
+    : ['-threads', '2'];
+  const x264MemParams = lowMem
+    ? ['-x264-params', 'rc-lookahead=8:ref=1:bframes=0:sync-lookahead=0:threads=1', '-bufsize', '2M']
+    : ['-x264-params', 'rc-lookahead=20:threads=2'];
 
   // Scale scene durations proportionally so visuals match actual narration audio length
   const rawTotal = req.clips.reduce((acc, c) => acc + Math.max(1.5, c.durationSec), 0) || 1;
@@ -134,7 +150,7 @@ export async function renderVideoWithFfmpeg(
   const srtContent = buildSynchronizedSrt(scaledClips);
   await fs.writeFile(srtPath, srtContent, 'utf8');
 
-  // 2. Normalize every scene clip to consistent resolution, 30fps, yuv420p, and exact duration
+  // 2. Normalize every scene clip to consistent resolution, fps, yuv420p, and exact duration
   const normalizedPaths: string[] = [];
   for (const clip of scaledClips) {
     const outSegment = resolveConfinedPath(
@@ -143,17 +159,21 @@ export async function renderVideoWithFfmpeg(
     );
 
     if (clip.mediaType === 'image') {
-      const frames = Math.max(30, Math.round(clip.durationSec * fps));
+      const frames = Math.max(fps, Math.round(clip.durationSec * fps));
+      // Keep zoompan source frame close to output size (never 2x/4K) to stay well under 512 MB RAM
+      const zpW = Math.ceil((width * 1.12) / 2) * 2;
+      const zpH = Math.ceil((height * 1.12) / 2) * 2;
       const vf = [
-        `scale=${width * 2}:${height * 2}:force_original_aspect_ratio=increase`,
-        `crop=${width * 2}:${height * 2}`,
-        `zoompan=z='min(zoom+0.0012,1.18)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${width}x${height}:fps=${fps}`,
+        `scale=${zpW}:${zpH}:force_original_aspect_ratio=increase`,
+        `crop=${zpW}:${zpH}`,
+        `zoompan=z='min(zoom+0.001,1.12)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${width}x${height}:fps=${fps}`,
         'eq=contrast=1.04:saturation=1.08',
         'format=yuv420p',
       ].join(',');
 
       await runFfmpeg([
         '-y',
+        ...threadFlags,
         '-loop',
         '1',
         '-i',
@@ -165,9 +185,12 @@ export async function renderVideoWithFfmpeg(
         '-c:v',
         'libx264',
         '-preset',
-        'veryfast',
+        x264Preset,
         '-crf',
-        '23',
+        lowMem ? '25' : '23',
+        ...x264MemParams,
+        '-max_muxing_queue_size',
+        '256',
         '-an',
         outSegment,
       ]);
@@ -182,6 +205,7 @@ export async function renderVideoWithFfmpeg(
 
       await runFfmpeg([
         '-y',
+        ...threadFlags,
         '-stream_loop',
         '-1',
         '-i',
@@ -193,9 +217,12 @@ export async function renderVideoWithFfmpeg(
         '-c:v',
         'libx264',
         '-preset',
-        'veryfast',
+        x264Preset,
         '-crf',
-        '23',
+        lowMem ? '25' : '23',
+        ...x264MemParams,
+        '-max_muxing_queue_size',
+        '256',
         '-an',
         outSegment,
       ]);
@@ -204,7 +231,7 @@ export async function renderVideoWithFfmpeg(
     normalizedPaths.push(outSegment);
   }
 
-  // 3. Concatenate normalized video segments via concat demuxer
+  // 3. Concatenate normalized video segments via concat demuxer (zero re-encode, near-zero RAM)
   const concatListPath = resolveConfinedPath(req.workDir, 'concat_list.txt');
   const concatBody = normalizedPaths.map((p) => `file '${p.replace(/'/g, "'\\''")}'`).join('\n');
   await fs.writeFile(concatListPath, concatBody, 'utf8');
@@ -223,9 +250,19 @@ export async function renderVideoWithFfmpeg(
     stitchedVideoPath,
   ]);
 
+  // Free disk/page-cache pressure from intermediate segment files right away
+  await Promise.all(normalizedPaths.map((p) => fs.rm(p, { force: true }).catch(() => undefined)));
+
   // 4. Final pass: burn subtitles (if enabled) + mix narration & optional ducked background music
   const finalVideoPath = resolveConfinedPath(req.workDir, 'final_output.mp4');
-  const ffmpegArgs: string[] = ['-y', '-i', stitchedVideoPath, '-i', req.narrationAudioPath];
+  const ffmpegArgs: string[] = [
+    '-y',
+    ...threadFlags,
+    '-i',
+    stitchedVideoPath,
+    '-i',
+    req.narrationAudioPath,
+  ];
 
   const hasMusic = Boolean(req.backgroundMusicPath);
   if (hasMusic && req.backgroundMusicPath) {
@@ -234,9 +271,11 @@ export async function renderVideoWithFfmpeg(
 
   const filterParts: string[] = [];
   let videoMap = '0:v';
+  const burnSubtitles =
+    req.subtitleStyle.enabled && req.subtitleStyle.burnIn && srtContent.trim().length > 0;
 
-  if (req.subtitleStyle.enabled && req.subtitleStyle.burnIn && srtContent.trim().length > 0) {
-    const marginV = req.format === '9:16' ? 220 : 64;
+  if (burnSubtitles) {
+    const marginV = req.format === '9:16' ? (lowMem ? 150 : 220) : 56;
     const alignment =
       req.subtitleStyle.position === 'center'
         ? 5
@@ -246,7 +285,7 @@ export async function renderVideoWithFfmpeg(
     const escapedSrt = srtPath.replace(/\\/g, '/').replace(/:/g, '\\:');
     const forceStyle = `FontName=DejaVu Sans,FontSize=${Math.max(
       14,
-      Math.min(36, Math.round(req.subtitleStyle.fontSize * 0.55))
+      Math.min(32, Math.round(req.subtitleStyle.fontSize * (lowMem ? 0.45 : 0.55)))
     )},PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H66000000,BorderStyle=3,Outline=2,Shadow=1,Alignment=${alignment},MarginV=${marginV}`;
     filterParts.push(`[0:v]subtitles='${escapedSrt}':force_style='${forceStyle}'[vout]`);
     videoMap = '[vout]';
@@ -259,7 +298,7 @@ export async function renderVideoWithFfmpeg(
     const fadeOutStart = Math.max(0, targetTotal - 2);
     if (req.duckingEnabled !== false) {
       filterParts.push(
-        `[1:a]volume=${narVol},loudnorm=I=-16:TP=-1.5:LRA=11[nar]`,
+        `[1:a]volume=${narVol},dynaudnorm=f=150:g=15[nar]`,
         `[2:a]volume=${musVol},afade=t=in:st=0:d=1.5,afade=t=out:st=${fadeOutStart.toFixed(
           2
         )}:d=2[mus]`,
@@ -268,7 +307,7 @@ export async function renderVideoWithFfmpeg(
       );
     } else {
       filterParts.push(
-        `[1:a]volume=${narVol},loudnorm=I=-16:TP=-1.5:LRA=11[nar]`,
+        `[1:a]volume=${narVol},dynaudnorm=f=150:g=15[nar]`,
         `[2:a]volume=${musVol},afade=t=in:st=0:d=1.5,afade=t=out:st=${fadeOutStart.toFixed(
           2
         )}:d=2[mus]`,
@@ -277,7 +316,8 @@ export async function renderVideoWithFfmpeg(
     }
     audioMap = '[aout]';
   } else {
-    filterParts.push(`[1:a]volume=${narVol},loudnorm=I=-16:TP=-1.5:LRA=11[aout]`);
+    // dynaudnorm uses far less RAM than two-pass loudnorm while keeping voice crisp
+    filterParts.push(`[1:a]volume=${narVol},dynaudnorm=f=150:g=15[aout]`);
     audioMap = '[aout]';
   }
 
@@ -285,25 +325,34 @@ export async function renderVideoWithFfmpeg(
     ffmpegArgs.push('-filter_complex', filterParts.join(';'));
   }
 
+  ffmpegArgs.push('-map', videoMap, '-map', audioMap);
+
+  if (burnSubtitles) {
+    ffmpegArgs.push(
+      '-c:v',
+      'libx264',
+      '-preset',
+      x264Preset,
+      '-crf',
+      lowMem ? '25' : '22',
+      ...x264MemParams,
+      '-pix_fmt',
+      'yuv420p'
+    );
+  } else {
+    // Stream-copy video when subtitles are off (zero re-encode RAM)
+    ffmpegArgs.push('-c:v', 'copy');
+  }
+
   ffmpegArgs.push(
-    '-map',
-    videoMap,
-    '-map',
-    audioMap,
-    '-c:v',
-    'libx264',
-    '-preset',
-    'veryfast',
-    '-crf',
-    '22',
-    '-pix_fmt',
-    'yuv420p',
     '-c:a',
     'aac',
     '-b:a',
-    '192k',
+    lowMem ? '128k' : '192k',
     '-ar',
-    '48000',
+    '44100',
+    '-max_muxing_queue_size',
+    '256',
     '-movflags',
     '+faststart',
     '-shortest',
@@ -311,6 +360,7 @@ export async function renderVideoWithFfmpeg(
   );
 
   await runFfmpeg(ffmpegArgs);
+  await fs.rm(stitchedVideoPath, { force: true }).catch(() => undefined);
 
   // 5. Quality check via ffprobe
   const stats = await fs.stat(finalVideoPath);
@@ -353,6 +403,8 @@ export async function generateThumbnailFromVideo(params: {
 
   await runFfmpeg([
     '-y',
+    '-threads',
+    '1',
     '-ss',
     '00:00:02',
     '-i',

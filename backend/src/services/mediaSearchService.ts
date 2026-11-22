@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { createWriteStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { config } from '../config/env.js';
@@ -144,10 +145,15 @@ async function searchPexels(
     };
     return (data.videos || [])
       .map((v): MediaCandidate | null => {
+        const maxWidth =
+          process.env.RENDER === 'true' && process.env.HIGH_MEMORY_WORKER !== 'true' ? 1280 : 1920;
         const mp4Files = (v.video_files || [])
-          .filter((f) => f.file_type === 'video/mp4' && f.width <= 1920)
+          .filter((f) => f.file_type === 'video/mp4' && f.width <= maxWidth)
           .sort((a, b) => b.width * b.height - a.width * a.height);
-        const best = mp4Files[0] || v.video_files?.[0];
+        const fallbackFiles = (v.video_files || [])
+          .filter((f) => f.file_type === 'video/mp4' && f.width <= 1920)
+          .sort((a, b) => a.width * a.height - b.width * b.height);
+        const best = mp4Files[0] || fallbackFiles[0] || v.video_files?.[0];
         if (!best?.link) return null;
         return {
           provider: 'pexels' as const,
@@ -448,21 +454,30 @@ export async function downloadAndPersistMedia(params: {
     }
   }
 
-  // Validate outbound URL before downloading
+  // Validate outbound URL before streaming directly to disk (avoids RAM spikes on 512 MB Render)
   const safeUrl = assertSafeExternalUrl(params.candidate.downloadUrl, 'media');
-  const buf = await downloadWithRetry(safeUrl.toString(), config.maxDownloadBytes, 3);
+  const { sha256, sizeBytes } = await downloadToFileWithRetry(
+    safeUrl.toString(),
+    localFilePath,
+    config.maxDownloadBytes,
+    3
+  );
 
   // Basic file integrity check
-  if (buf.length < 1024) {
+  if (sizeBytes < 1024) {
     throw new Error('Downloaded media file failed integrity check (too small).');
   }
 
-  const sha256 = computeSha256(buf);
   const storagePath = `${params.userId}/${params.projectId}/${sha256.slice(0, 16)}${ext}`;
   const contentType = params.candidate.mediaType === 'video' ? 'video/mp4' : 'image/jpeg';
 
-  await fs.writeFile(localFilePath, buf);
+  // Skip mirroring oversized raw clips on low-memory containers (source clips are purged after render anyway)
+  const lowMem = process.env.RENDER === 'true' && process.env.HIGH_MEMORY_WORKER !== 'true';
+  if (lowMem && sizeBytes > 18 * 1024 * 1024) {
+    return { localFilePath, storagePath: '', sha256, sizeBytes };
+  }
 
+  const buf = await fs.readFile(localFilePath);
   const { error: uploadError } = await uploadToStorageWithAutoBucket({
     bucket: 'source-media',
     storagePath,
@@ -472,21 +487,24 @@ export async function downloadAndPersistMedia(params: {
   });
 
   if (uploadError) {
-    // If a single high-bitrate clip exceeds Supabase Free Tier's 50 MB upload cap,
-    // keep rendering from the verified local file (source clips are purged after render anyway).
     if (/maximum allowed size|payload too large|entity too large|413/i.test(uploadError.message)) {
       console.warn(
-        `[AutoTube Media] Skipping persistent mirror for oversized clip (${buf.length} bytes); continuing with local file.`
+        `[AutoTube Media] Skipping persistent mirror for oversized clip (${sizeBytes} bytes); continuing with local file.`
       );
-      return { localFilePath, storagePath: '', sha256, sizeBytes: buf.length };
+      return { localFilePath, storagePath: '', sha256, sizeBytes };
     }
     throw new Error(`Failed to upload source media to persistent storage: ${uploadError.message}`);
   }
 
-  return { localFilePath, storagePath, sha256, sizeBytes: buf.length };
+  return { localFilePath, storagePath, sha256, sizeBytes };
 }
 
-async function downloadWithRetry(url: string, maxBytes: number, retries: number): Promise<Buffer> {
+async function downloadToFileWithRetry(
+  url: string,
+  destPath: string,
+  maxBytes: number,
+  retries: number
+): Promise<{ sha256: string; sizeBytes: number }> {
   let lastError: unknown;
   for (let attempt = 1; attempt <= retries; attempt++) {
     const controller = new AbortController();
@@ -501,27 +519,45 @@ async function downloadWithRetry(url: string, maxBytes: number, retries: number)
         throw new Error(`Media file exceeds maximum allowed size (${maxBytes} bytes).`);
       }
 
-      const chunks: Buffer[] = [];
+      const hash = crypto.createHash('sha256');
       let total = 0;
       const reader = res.body?.getReader();
       if (!reader) {
         const arr = Buffer.from(await res.arrayBuffer());
         if (arr.length > maxBytes) throw new Error('Downloaded buffer exceeded size limit.');
-        return arr;
+        await fs.writeFile(destPath, arr);
+        hash.update(arr);
+        return { sha256: hash.digest('hex'), sizeBytes: arr.length };
       }
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        total += value.byteLength;
-        if (total > maxBytes) {
-          throw new Error('Streaming download exceeded max allowed size.');
+      const fileStream = createWriteStream(destPath);
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          total += value.byteLength;
+          if (total > maxBytes) {
+            throw new Error('Streaming download exceeded max allowed size.');
+          }
+          const chunk = Buffer.from(value);
+          hash.update(chunk);
+          if (!fileStream.write(chunk)) {
+            await new Promise<void>((resolve) => fileStream.once('drain', resolve));
+          }
         }
-        chunks.push(Buffer.from(value));
+        await new Promise<void>((resolve, reject) => {
+          fileStream.end(() => resolve());
+          fileStream.once('error', reject);
+        });
+      } catch (streamErr) {
+        fileStream.destroy();
+        throw streamErr;
       }
-      return Buffer.concat(chunks);
+
+      return { sha256: hash.digest('hex'), sizeBytes: total };
     } catch (err) {
       lastError = err;
+      await fs.rm(destPath, { force: true }).catch(() => undefined);
       if (attempt < retries) {
         await new Promise((r) => setTimeout(r, attempt * 1500));
       }

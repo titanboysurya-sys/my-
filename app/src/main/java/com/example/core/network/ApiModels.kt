@@ -23,7 +23,8 @@ data class SupabaseAuthRequest(
 @JsonClass(generateAdapter = true)
 data class SupabaseIdTokenRequest(
     val provider: String = "google",
-    @Json(name = "id_token") val idToken: String
+    @Json(name = "id_token") val idToken: String,
+    val nonce: String? = null
 )
 
 @JsonClass(generateAdapter = true)

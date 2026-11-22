@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { config, sanitizeErrorMessage } from '../config/env.js';
-import { getSupabaseAdmin } from '../db/supabase.js';
+import { uploadToStorageWithAutoBucket } from '../db/supabase.js';
 import { resolveConfinedPath } from '../security/urlGuard.js';
 import { resolveUserProviderKey } from './credentialService.js';
 
@@ -54,13 +54,13 @@ export async function synthesizeNarration(
 
       const durationSec = await probeAudioDurationSeconds(localAudioPath);
       const storagePath = `${req.userId}/${req.projectId}/narration.${audio.ext}`;
-      const supabase = getSupabaseAdmin();
-      const { error: uploadError } = await supabase.storage
-        .from('voice-audio')
-        .upload(storagePath, audio.buffer, {
-          contentType: audio.mimeType,
-          upsert: true,
-        });
+      const { error: uploadError } = await uploadToStorageWithAutoBucket({
+        bucket: 'voice-audio',
+        storagePath,
+        data: audio.buffer,
+        contentType: audio.mimeType,
+        upsert: true,
+      });
 
       if (uploadError) {
         throw new Error(`Failed to persist narration audio: ${uploadError.message}`);

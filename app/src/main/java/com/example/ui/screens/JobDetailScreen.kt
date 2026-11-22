@@ -206,7 +206,7 @@ fun JobDetailScreen(
                         ) {
                             Icon(Icons.Rounded.Replay, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("Retry Failed Stage")
+                            Text("Retry Stage", maxLines = 1)
                         }
                         OutlinedButton(
                             onClick = { onCancel(jobId) },
@@ -216,7 +216,7 @@ fun JobDetailScreen(
                         ) {
                             Icon(Icons.Rounded.Cancel, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("Cancel")
+                            Text("Cancel", maxLines = 1)
                         }
                     }
                 }

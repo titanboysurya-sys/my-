@@ -2,6 +2,7 @@ import cors from 'cors';
 import express, { type Request, type Response, type NextFunction } from 'express';
 import helmet from 'helmet';
 import { config, sanitizeErrorMessage } from './config/env.js';
+import { ensureAllCoreBuckets } from './db/supabase.js';
 import { apiRateLimiter } from './middleware/auth.js';
 import { apiRouter } from './routes/apiRoutes.js';
 import { publicPagesRouter } from './routes/publicPages.js';
@@ -73,6 +74,7 @@ if (isMainModule) {
     console.log(
       `[AutoTube API] Listening on port ${config.port} (${config.nodeEnv}, embeddedWorker=${embeddedWorkerEnabled})`
     );
+    void ensureAllCoreBuckets();
     if (embeddedWorkerEnabled) {
       workerHandle = startWorkerLoop();
       schedulerTimer = setInterval(() => {

@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { config } from '../config/env.js';
-import { getSupabaseAdmin } from '../db/supabase.js';
+import { getSupabaseAdmin, uploadToStorageWithAutoBucket } from '../db/supabase.js';
 import { assertSafeExternalUrl, resolveConfinedPath } from '../security/urlGuard.js';
 import { resolveUserProviderKey } from './credentialService.js';
 
@@ -463,11 +463,23 @@ export async function downloadAndPersistMedia(params: {
 
   await fs.writeFile(localFilePath, buf);
 
-  const { error: uploadError } = await supabase.storage
-    .from('source-media')
-    .upload(storagePath, buf, { contentType, upsert: true });
+  const { error: uploadError } = await uploadToStorageWithAutoBucket({
+    bucket: 'source-media',
+    storagePath,
+    data: buf,
+    contentType,
+    upsert: true,
+  });
 
   if (uploadError) {
+    // If a single high-bitrate clip exceeds Supabase Free Tier's 50 MB upload cap,
+    // keep rendering from the verified local file (source clips are purged after render anyway).
+    if (/maximum allowed size|payload too large|entity too large|413/i.test(uploadError.message)) {
+      console.warn(
+        `[AutoTube Media] Skipping persistent mirror for oversized clip (${buf.length} bytes); continuing with local file.`
+      );
+      return { localFilePath, storagePath: '', sha256, sizeBytes: buf.length };
+    }
     throw new Error(`Failed to upload source media to persistent storage: ${uploadError.message}`);
   }
 

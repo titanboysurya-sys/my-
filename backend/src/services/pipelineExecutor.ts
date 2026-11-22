@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { config, sanitizeErrorMessage } from '../config/env.js';
-import { getSupabaseAdmin } from '../db/supabase.js';
+import { getSupabaseAdmin, uploadToStorageWithAutoBucket } from '../db/supabase.js';
 import { resolveConfinedPath } from '../security/urlGuard.js';
 import {
   createAIProviderForUser,
@@ -15,6 +15,7 @@ import {
 import {
   downloadAndPersistMedia,
   findBestMediaForScene,
+  type ScoredMediaCandidate,
 } from './mediaSearchService.js';
 import {
   generateThumbnailFromVideo,
@@ -328,12 +329,23 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
     }
 
     // =========================================================================
-    // STAGE 4 & 5: Media Search (Pexels/Pixabay/Wikimedia) + Deduplicated Download
+    // STAGE 4: Media Search (Pexels/Pixabay/Wikimedia)
     // =========================================================================
     const timelineClips: TimelineSceneClip[] = [];
     const usedExternalIds = new Set<string>();
+    const pendingDownloads: Array<{
+      scene: (typeof scenes)[number];
+      candidate: ScoredMediaCandidate;
+    }> = [];
 
-    await updateJobStage(job.id, project.id, 'searching_media', 38, 'Searching relevant stock footage across Pexels & Pixabay', completedStages);
+    await updateJobStage(
+      job.id,
+      project.id,
+      'searching_media',
+      38,
+      'Searching relevant stock footage across Pexels & Pixabay',
+      completedStages
+    );
 
     for (let i = 0; i < scenes.length; i++) {
       const scene = scenes[i];
@@ -386,14 +398,23 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
         );
       }
       usedExternalIds.add(candidate.externalId);
+      pendingDownloads.push({ scene, candidate });
+    }
 
-      const dlProgress = 42 + Math.round(((i + 1) / scenes.length) * 14);
+    markStageDone('searching_media');
+
+    // =========================================================================
+    // STAGE 5: Deduplicated Download & Verification
+    // =========================================================================
+    for (let i = 0; i < pendingDownloads.length; i++) {
+      const { scene, candidate } = pendingDownloads[i];
+      const dlProgress = 42 + Math.round(((i + 1) / Math.max(1, pendingDownloads.length)) * 14);
       await updateJobStage(
         job.id,
         project.id,
         'downloading_media',
         dlProgress,
-        `Downloading & verifying scene ${i + 1} of ${scenes.length} (${candidate.provider})`,
+        `Downloading & verifying clip ${i + 1} of ${pendingDownloads.length} (${candidate.provider})`,
         completedStages
       );
 
@@ -413,7 +434,7 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
         external_id: candidate.externalId,
         original_url: candidate.originalUrl,
         download_url: candidate.downloadUrl,
-        storage_path: downloaded.storagePath,
+        storage_path: downloaded.storagePath || null,
         sha256_hash: downloaded.sha256,
         file_size_bytes: downloaded.sizeBytes,
         license_metadata: candidate.licenseMetadata,
@@ -445,7 +466,7 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
       });
     }
 
-    markStageDone('searching_media');
+    timelineClips.sort((a, b) => a.sceneNumber - b.sceneNumber);
     markStageDone('downloading_media');
 
     // =========================================================================
@@ -562,23 +583,43 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
       duckingEnabled: musicCfg.ducking_enabled,
     });
 
-    const videoStoragePath = `${job.user_id}/${project.id}/final_${Date.now()}.mp4`;
+    let videoStoragePath: string | null = `${job.user_id}/${project.id}/final_${Date.now()}.mp4`;
     const srtStoragePath = `${job.user_id}/${project.id}/subtitles.srt`;
     const [videoBytes, srtBytes] = await Promise.all([
       fs.readFile(rendered.finalVideoPath),
       fs.readFile(rendered.srtPath),
     ]);
 
-    const { error: vidUploadErr } = await supabase.storage
-      .from('rendered-videos')
-      .upload(videoStoragePath, videoBytes, { contentType: 'video/mp4', upsert: true });
+    const uploadCfgPreview = (project.upload_config || {}) as { auto_upload?: boolean };
+    const { error: vidUploadErr } = await uploadToStorageWithAutoBucket({
+      bucket: 'rendered-videos',
+      storagePath: videoStoragePath,
+      data: videoBytes,
+      contentType: 'video/mp4',
+      upsert: true,
+    });
     if (vidUploadErr) {
-      throw new Error(`Failed to upload rendered video to storage: ${vidUploadErr.message}`);
+      if (
+        uploadCfgPreview.auto_upload &&
+        /maximum allowed size|payload too large|entity too large|413/i.test(vidUploadErr.message)
+      ) {
+        // Auto-upload to YouTube directly from local rendered MP4 even if it exceeds Supabase Free Tier 50 MB cap
+        console.warn(
+          `[AutoTube Render] Rendered MP4 (${videoBytes.length} bytes) exceeds storage cap; uploading directly to YouTube.`
+        );
+        videoStoragePath = null;
+      } else {
+        throw new Error(`Failed to upload rendered video to storage: ${vidUploadErr.message}`);
+      }
     }
 
-    await supabase.storage
-      .from('subtitles')
-      .upload(srtStoragePath, srtBytes, { contentType: 'text/plain', upsert: true });
+    await uploadToStorageWithAutoBucket({
+      bucket: 'subtitles',
+      storagePath: srtStoragePath,
+      data: srtBytes,
+      contentType: 'text/plain',
+      upsert: true,
+    });
 
     markStageDone('rendering');
 
@@ -607,9 +648,13 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
     });
     const thumbStoragePath = `${job.user_id}/${project.id}/thumbnail_${Date.now()}.jpg`;
     const thumbBytes = await fs.readFile(localThumbPath);
-    await supabase.storage
-      .from('thumbnails')
-      .upload(thumbStoragePath, thumbBytes, { contentType: 'image/jpeg', upsert: true });
+    await uploadToStorageWithAutoBucket({
+      bucket: 'thumbnails',
+      storagePath: thumbStoragePath,
+      data: thumbBytes,
+      contentType: 'image/jpeg',
+      upsert: true,
+    });
 
     await supabase
       .from('projects')

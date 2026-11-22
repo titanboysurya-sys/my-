@@ -2,6 +2,14 @@ import { Router, type Request, type Response } from 'express';
 
 export const publicPagesRouter = Router();
 
+// Google Search Console domain ownership verification file
+publicPagesRouter.get('/google42c0586f23c6e841.html', (_req: Request, res: Response) => {
+  res
+    .status(200)
+    .type('text/html; charset=utf-8')
+    .send('google-site-verification: google42c0586f23c6e841.html');
+});
+
 function renderLayout(title: string, bodyHtml: string): string {
   return `<!DOCTYPE html>
 <html lang="en">

@@ -251,6 +251,12 @@ class StudioRepository(
         database.notificationDao().clearForUser(uid)
     }
 
+    suspend fun deleteAccountAndData(): Result<Unit> = safeApiCall {
+        client.backendApi().deleteAccount()
+        clearLocalCache()
+        sessionStore.clearSession()
+    }
+
     suspend fun refreshDashboard(): Result<DashboardResponse> = safeApiCall {
         val uid = requireUserId()
         val resp = client.backendApi().getDashboard()

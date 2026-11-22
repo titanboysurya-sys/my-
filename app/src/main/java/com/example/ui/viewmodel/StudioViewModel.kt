@@ -276,6 +276,21 @@ class StudioViewModel(
         }
     }
 
+    fun deleteAccount() {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true) }
+            repository.deleteAccountAndData()
+                .onSuccess {
+                    _uiState.update { it.copy(isLoading = false) }
+                    showInfo("Account and all cloud data permanently deleted")
+                }
+                .onFailure { err ->
+                    _uiState.update { it.copy(isLoading = false) }
+                    showError(err.message ?: "Could not delete account")
+                }
+        }
+    }
+
     fun saveCloudEndpoints(backendUrl: String, supabaseUrl: String, supabaseAnonKey: String) {
         viewModelScope.launch {
             repository.saveCloudEndpoints(backendUrl, supabaseUrl, supabaseAnonKey)

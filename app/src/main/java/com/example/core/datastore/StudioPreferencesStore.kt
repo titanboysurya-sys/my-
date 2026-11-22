@@ -20,7 +20,7 @@ data class StudioAppSettings(
     val backendApiUrl: String = DEFAULT_BACKEND_URL,
     val supabaseUrl: String = DEFAULT_SUPABASE_URL,
     val supabaseAnonKey: String = DEFAULT_SUPABASE_ANON_KEY,
-    val googleWebClientId: String = "",
+    val googleWebClientId: String = DEFAULT_GOOGLE_WEB_CLIENT_ID,
     val darkTheme: Boolean = true,
     val appLanguage: String = "en",
     val defaultQuality: String = "1080p",
@@ -33,25 +33,64 @@ data class StudioAppSettings(
     val lastNotifiedEventId: String = ""
 ) {
     companion object {
+        private const val PROD_BACKEND_URL = "https://auto-studio-xm5k.onrender.com"
+        private const val PROD_SUPABASE_URL = "https://etfyzcbjcrnkqvxoxibn.supabase.co"
+        // Public client publishable key (safe to ship in mobile apps; protected by Supabase RLS)
+        private const val PROD_SUPABASE_PUBLISHABLE_KEY =
+            "sb_publishable_xXtBlI675dY79Twmdzr2pQ_EQvpYqHd"
+        // Public Google OAuth Web Client ID for Android Credential Manager One-Tap (not a secret)
+        private const val PROD_GOOGLE_WEB_CLIENT_ID =
+            "684427959696-puv5aaboojuhklk6tpajevmjppakohn5.apps.googleusercontent.com"
+
+        private fun isPlaceholder(value: String?): Boolean {
+            if (value.isNullOrBlank()) return true
+            val lower = value.lowercase()
+            return lower.contains("your-autotube-api") ||
+                lower.contains("your-project-ref") ||
+                lower.contains("my_supabase_") ||
+                lower.contains("my_backend_")
+        }
+
         val DEFAULT_BACKEND_URL: String
-            get() = BuildConfig.BACKEND_API_URL.ifBlank { "https://your-autotube-api.onrender.com" }
+            get() = BuildConfig.BACKEND_API_URL.takeUnless { isPlaceholder(it) } ?: PROD_BACKEND_URL
         val DEFAULT_SUPABASE_URL: String
-            get() = BuildConfig.SUPABASE_URL.ifBlank { "https://your-project-ref.supabase.co" }
+            get() = BuildConfig.SUPABASE_URL.takeUnless { isPlaceholder(it) } ?: PROD_SUPABASE_URL
         val DEFAULT_SUPABASE_ANON_KEY: String
-            get() = BuildConfig.SUPABASE_ANON_KEY
+            get() = BuildConfig.SUPABASE_ANON_KEY.takeUnless { isPlaceholder(it) }
+                ?: PROD_SUPABASE_PUBLISHABLE_KEY
+        val DEFAULT_GOOGLE_WEB_CLIENT_ID: String
+            get() = PROD_GOOGLE_WEB_CLIENT_ID
     }
 }
 
 class StudioPreferencesStore(private val context: Context) {
+    private fun resolveNonPlaceholder(saved: String?, fallback: String): String {
+        if (saved.isNullOrBlank()) return fallback
+        val lower = saved.lowercase()
+        val placeholder = lower.contains("your-autotube-api") ||
+            lower.contains("your-project-ref") ||
+            lower.contains("my_supabase_") ||
+            lower.contains("my_backend_")
+        return if (placeholder) fallback else saved
+    }
+
     val settingsFlow: Flow<StudioAppSettings> = context.studioDataStore.data.map { prefs ->
         StudioAppSettings(
-            backendApiUrl = prefs[KEY_BACKEND_URL]?.ifBlank { StudioAppSettings.DEFAULT_BACKEND_URL }
-                ?: StudioAppSettings.DEFAULT_BACKEND_URL,
-            supabaseUrl = prefs[KEY_SUPABASE_URL]?.ifBlank { StudioAppSettings.DEFAULT_SUPABASE_URL }
-                ?: StudioAppSettings.DEFAULT_SUPABASE_URL,
-            supabaseAnonKey = prefs[KEY_SUPABASE_ANON_KEY]
-                ?: StudioAppSettings.DEFAULT_SUPABASE_ANON_KEY,
-            googleWebClientId = prefs[KEY_GOOGLE_WEB_CLIENT_ID] ?: "",
+            backendApiUrl = resolveNonPlaceholder(
+                prefs[KEY_BACKEND_URL],
+                StudioAppSettings.DEFAULT_BACKEND_URL
+            ),
+            supabaseUrl = resolveNonPlaceholder(
+                prefs[KEY_SUPABASE_URL],
+                StudioAppSettings.DEFAULT_SUPABASE_URL
+            ),
+            supabaseAnonKey = resolveNonPlaceholder(
+                prefs[KEY_SUPABASE_ANON_KEY],
+                StudioAppSettings.DEFAULT_SUPABASE_ANON_KEY
+            ),
+            googleWebClientId = prefs[KEY_GOOGLE_WEB_CLIENT_ID]?.ifBlank {
+                StudioAppSettings.DEFAULT_GOOGLE_WEB_CLIENT_ID
+            } ?: StudioAppSettings.DEFAULT_GOOGLE_WEB_CLIENT_ID,
             darkTheme = prefs[KEY_DARK_THEME] ?: true,
             appLanguage = prefs[KEY_LANGUAGE] ?: "en",
             defaultQuality = prefs[KEY_QUALITY] ?: "1080p",

@@ -94,4 +94,8 @@ interface AutoTubeBackendApi {
     // Notifications
     @GET("api/notifications")
     suspend fun getNotifications(): NotificationsListResponse
+
+    // Account Deletion (Play Store & Multi-User Production Compliance)
+    @DELETE("api/account")
+    suspend fun deleteAccount(): SimpleStatusResponse
 }

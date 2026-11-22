@@ -112,9 +112,7 @@ fun AuthSetupScreen(
     var email by rememberSaveable { mutableStateOf("") }
     var password by rememberSaveable { mutableStateOf("") }
     var showPassword by rememberSaveable { mutableStateOf(false) }
-    var showCloudConfig by rememberSaveable {
-        mutableStateOf(settings.supabaseAnonKey.isBlank() || settings.backendApiUrl.contains("your-autotube-api"))
-    }
+    var showCloudConfig by rememberSaveable { mutableStateOf(false) }
 
     var backendUrl by remember(settings.backendApiUrl) { mutableStateOf(settings.backendApiUrl) }
     var supabaseUrl by remember(settings.supabaseUrl) { mutableStateOf(settings.supabaseUrl) }

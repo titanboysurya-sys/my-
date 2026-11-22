@@ -23,18 +23,25 @@ import androidx.compose.material.icons.automirrored.rounded.Logout
 import androidx.compose.material.icons.rounded.AudioFile
 import androidx.compose.material.icons.rounded.CleaningServices
 import androidx.compose.material.icons.rounded.Cloud
+import androidx.compose.material.icons.rounded.DeleteForever
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.SmartDisplay
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -65,12 +72,15 @@ fun SettingsScreen(
     onUpdateDefaults: (language: String, format: String, quality: String) -> Unit,
     onToggleNotifications: (Boolean) -> Unit,
     onClearCache: () -> Unit,
-    onSignOut: () -> Unit
+    onSignOut: () -> Unit,
+    onDeleteAccount: () -> Unit
 ) {
     var backendUrl by remember(settings.backendApiUrl) { mutableStateOf(settings.backendApiUrl) }
     var supabaseUrl by remember(settings.supabaseUrl) { mutableStateOf(settings.supabaseUrl) }
     var supabaseAnonKey by remember(settings.supabaseAnonKey) { mutableStateOf(settings.supabaseAnonKey) }
     var selectedMusicUri by remember { mutableStateOf<String?>(null) }
+    var showAdvancedServerConfig by remember { mutableStateOf(false) }
+    var showDeleteConfirmDialog by remember { mutableStateOf(false) }
 
     // Zero-permission Storage Access Framework picker for licensed user audio tracks
     val musicPickerLauncher = rememberLauncherForActivityResult(
@@ -250,7 +260,7 @@ fun SettingsScreen(
             }
         }
 
-        // Cloud Server Configuration
+        // Advanced Server Configuration (collapsed by default for clean production UX)
         item {
             Card(
                 shape = MaterialTheme.shapes.medium,
@@ -261,82 +271,149 @@ fun SettingsScreen(
                     modifier = Modifier.padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Rounded.Cloud, contentDescription = null, tint = PipelineCyan)
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("Render Backend & Supabase", style = MaterialTheme.typography.titleMedium)
-                    }
-                    OutlinedTextField(
-                        value = backendUrl,
-                        onValueChange = { backendUrl = it },
-                        label = { Text("Render Backend API URL") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    OutlinedTextField(
-                        value = supabaseUrl,
-                        onValueChange = { supabaseUrl = it },
-                        label = { Text("Supabase Project URL") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    OutlinedTextField(
-                        value = supabaseAnonKey,
-                        onValueChange = { supabaseAnonKey = it },
-                        label = { Text("Supabase Anon Key") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(
-                            onClick = { onSaveEndpoints(backendUrl, supabaseUrl, supabaseAnonKey) },
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(48.dp)
-                        ) {
-                            Text("Save URLs")
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { showAdvancedServerConfig = !showAdvancedServerConfig },
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Rounded.Cloud, contentDescription = null, tint = PipelineCyan)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column {
+                                Text("Advanced Server Connection", style = MaterialTheme.typography.titleMedium)
+                                Text(
+                                    text = "Pre-configured cloud backend • Tap to inspect or edit",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                         }
-                        OutlinedButton(
-                            onClick = { onCheckHealth(backendUrl) },
-                            modifier = Modifier.height(48.dp)
-                        ) {
-                            Text("Check Health")
+                        IconButton(onClick = { showAdvancedServerConfig = !showAdvancedServerConfig }) {
+                            Icon(
+                                imageVector = if (showAdvancedServerConfig) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                                contentDescription = "Toggle server configuration"
+                            )
+                        }
+                    }
+
+                    if (showAdvancedServerConfig) {
+                        OutlinedTextField(
+                            value = backendUrl,
+                            onValueChange = { backendUrl = it },
+                            label = { Text("Render Backend API URL") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        OutlinedTextField(
+                            value = supabaseUrl,
+                            onValueChange = { supabaseUrl = it },
+                            label = { Text("Supabase Project URL") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        OutlinedTextField(
+                            value = supabaseAnonKey,
+                            onValueChange = { supabaseAnonKey = it },
+                            label = { Text("Supabase Publishable / Anon Key") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = { onSaveEndpoints(backendUrl, supabaseUrl, supabaseAnonKey) },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(48.dp)
+                            ) {
+                                Text("Save URLs")
+                            }
+                            OutlinedButton(
+                                onClick = { onCheckHealth(backendUrl) },
+                                modifier = Modifier.height(48.dp)
+                            ) {
+                                Text("Check Health")
+                            }
                         }
                     }
                 }
             }
         }
 
-        // Storage & Sign Out
+        // Storage, Sign Out & Self-Service Account Deletion
         item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                OutlinedButton(
-                    onClick = onClearCache,
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(48.dp)
-                        .testTag("settings_clear_cache_button")
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Icon(Icons.Rounded.CleaningServices, contentDescription = null)
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Clear Cache")
+                    OutlinedButton(
+                        onClick = onClearCache,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                            .testTag("settings_clear_cache_button")
+                    ) {
+                        Icon(Icons.Rounded.CleaningServices, contentDescription = null)
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Clear Cache")
+                    }
+                    OutlinedButton(
+                        onClick = onSignOut,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                            .testTag("settings_sign_out_button")
+                    ) {
+                        Icon(Icons.AutoMirrored.Rounded.Logout, contentDescription = null, tint = StudioErrorRed)
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Sign Out", color = StudioErrorRed)
+                    }
                 }
-                OutlinedButton(
-                    onClick = onSignOut,
+
+                TextButton(
+                    onClick = { showDeleteConfirmDialog = true },
                     modifier = Modifier
-                        .weight(1f)
+                        .fillMaxWidth()
                         .height(48.dp)
-                        .testTag("settings_sign_out_button")
+                        .testTag("settings_delete_account_button")
                 ) {
-                    Icon(Icons.AutoMirrored.Rounded.Logout, contentDescription = null, tint = StudioErrorRed)
+                    Icon(Icons.Rounded.DeleteForever, contentDescription = null, tint = StudioErrorRed)
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("Sign Out", color = StudioErrorRed)
+                    Text("Delete Account & All Cloud Data", color = StudioErrorRed)
                 }
             }
             Spacer(modifier = Modifier.height(20.dp))
         }
+    }
+
+    if (showDeleteConfirmDialog) {
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirmDialog = false },
+            title = { Text("Delete Account Permanently?") },
+            text = {
+                Text(
+                    "This permanently deletes your Studio account, saved API keys, connected YouTube tokens, schedules, and all cloud files. Videos already uploaded to YouTube will remain on your YouTube channel."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showDeleteConfirmDialog = false
+                        onDeleteAccount()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = StudioErrorRed),
+                    modifier = Modifier.testTag("confirm_delete_account_button")
+                ) {
+                    Text("Delete Permanently")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirmDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 }

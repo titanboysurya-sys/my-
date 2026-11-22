@@ -352,7 +352,8 @@ private fun AutoTubeStudioRoot(viewModel: StudioViewModel) {
                                         viewModel.updateAppPreferences(notificationsEnabled = enabled)
                                     },
                                     onClearCache = viewModel::clearLocalCache,
-                                    onSignOut = viewModel::signOut
+                                    onSignOut = viewModel::signOut,
+                                    onDeleteAccount = viewModel::deleteAccount
                                 )
                             }
 

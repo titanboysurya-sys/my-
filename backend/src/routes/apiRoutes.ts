@@ -175,6 +175,62 @@ apiRouter.put('/profile/preferences', async (req: AuthenticatedRequest, res: Res
   }
 });
 
+// Self-service account & cloud data deletion (Play Store & production multi-user compliance)
+apiRouter.delete('/account', sensitiveRateLimiter, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const userId = getAuthUserId(req);
+    const supabase = getSupabaseAdmin();
+
+    // Remove any stored user files across all private storage buckets
+    const buckets = [
+      'source-media',
+      'voice-audio',
+      'thumbnails',
+      'rendered-videos',
+      'subtitles',
+      'music-tracks',
+    ];
+    for (const bucket of buckets) {
+      const { data: topEntries } = await supabase.storage
+        .from(bucket)
+        .list(userId, { limit: 100 })
+        .catch(() => ({ data: null }));
+      if (!topEntries?.length) continue;
+
+      const pathsToRemove: string[] = [];
+      for (const entry of topEntries) {
+        if (entry.id) {
+          pathsToRemove.push(`${userId}/${entry.name}`);
+        } else {
+          // Subfolder (e.g., project_id)
+          const { data: nested } = await supabase.storage
+            .from(bucket)
+            .list(`${userId}/${entry.name}`, { limit: 100 })
+            .catch(() => ({ data: null }));
+          for (const child of nested || []) {
+            if (child.name) {
+              pathsToRemove.push(`${userId}/${entry.name}/${child.name}`);
+            }
+          }
+        }
+      }
+      if (pathsToRemove.length > 0) {
+        await supabase.storage.from(bucket).remove(pathsToRemove).catch(() => undefined);
+      }
+    }
+
+    // Delete auth user (cascades all 12 multi-user tables via ON DELETE CASCADE)
+    const { error: deleteErr } = await supabase.auth.admin.deleteUser(userId);
+    if (deleteErr) {
+      throw new Error(deleteErr.message);
+    }
+
+    res.json({ deleted: true });
+  } catch (err) {
+    res.status(500).json({ error: sanitizeErrorMessage(err) });
+  }
+});
+
 // ============================================================================
 // BYOK CREDENTIALS (Encrypted at rest; full keys NEVER returned)
 // ============================================================================
@@ -338,6 +394,9 @@ apiRouter.post('/projects', sensitiveRateLimiter, async (req: AuthenticatedReque
       startImmediately: z.boolean().default(true),
     });
     const body = schema.parse(req.body);
+    if (body.startImmediately) {
+      await enforceUserJobQuota(userId);
+    }
     const supabase = getSupabaseAdmin();
 
     const { data: project, error } = await supabase
@@ -708,6 +767,8 @@ apiRouter.post('/jobs/create', sensitiveRateLimiter, async (req: AuthenticatedRe
       return;
     }
 
+    await enforceUserJobQuota(userId);
+
     const key = body.idempotencyKey || `job-${body.projectId}-${Date.now()}`;
     const { data: job, error } = await supabase
       .from('video_jobs')
@@ -1009,4 +1070,45 @@ function computeNextRunIso(hhmm: string): string {
     next.setUTCDate(next.getUTCDate() + 1);
   }
   return next.toISOString();
+}
+
+async function enforceUserJobQuota(userId: string): Promise<void> {
+  const supabase = getSupabaseAdmin();
+  const monthStart = new Date();
+  monthStart.setUTCDate(1);
+  monthStart.setUTCHours(0, 0, 0, 0);
+
+  const [profileRes, activeRes, monthlyRes] = await Promise.all([
+    supabase
+      .from('profiles')
+      .select('max_concurrent_jobs, monthly_video_quota')
+      .eq('user_id', userId)
+      .maybeSingle(),
+    supabase
+      .from('video_jobs')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', userId)
+      .not('status', 'in', '("published","scheduled","failed","cancelled","awaiting_approval")'),
+    supabase
+      .from('video_jobs')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', userId)
+      .gte('created_at', monthStart.toISOString()),
+  ]);
+
+  const maxConcurrent = Number(profileRes.data?.max_concurrent_jobs ?? 2);
+  const monthlyQuota = Number(profileRes.data?.monthly_video_quota ?? 100);
+  const activeCount = activeRes.count || 0;
+  const monthlyCount = monthlyRes.count || 0;
+
+  if (activeCount >= maxConcurrent) {
+    throw new Error(
+      `Concurrent job limit reached (${activeCount}/${maxConcurrent} active). Wait for an active render to finish before starting another.`
+    );
+  }
+  if (monthlyQuota > 0 && monthlyCount >= monthlyQuota) {
+    throw new Error(
+      `Monthly video quota reached (${monthlyCount}/${monthlyQuota} this month).`
+    );
+  }
 }

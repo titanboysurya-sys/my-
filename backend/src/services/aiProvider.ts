@@ -1,6 +1,13 @@
 import { sanitizeErrorMessage } from '../config/env.js';
+import { getSupabaseAdmin } from '../db/supabase.js';
 import { assertSafeExternalUrl } from '../security/urlGuard.js';
-import { resolveUserProviderKey } from './credentialService.js';
+import {
+  DEFAULT_GROQ_MODEL,
+  GROQ_BASE_URL,
+  resolveUserProviderKey,
+} from './credentialService.js';
+
+export type LLMProviderName = 'gemini' | 'groq' | 'openai_compatible';
 
 export interface TopicResearchInput {
   niche: string;
@@ -263,6 +270,132 @@ class OpenAICompatibleProvider implements AIProviderClient {
   }
 }
 
+class GroqAIProvider implements AIProviderClient {
+  readonly name = 'groq';
+  private readonly models: string[];
+
+  constructor(private readonly apiKey: string, model = DEFAULT_GROQ_MODEL) {
+    const preferredModel = (model || DEFAULT_GROQ_MODEL).trim();
+    const candidates = [preferredModel, DEFAULT_GROQ_MODEL, 'llama-3.1-8b-instant'];
+    this.models = Array.from(new Set(candidates.filter(Boolean)));
+  }
+
+  async generateJson<T>(systemPrompt: string, userPrompt: string): Promise<T> {
+    const ensuredSystem = /json/i.test(systemPrompt)
+      ? systemPrompt
+      : `${systemPrompt}\nReturn strictly valid JSON.`;
+    const errors: string[] = [];
+
+    for (let i = 0; i < this.models.length; i++) {
+      const model = this.models[i];
+      const res = await fetch(`${GROQ_BASE_URL}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${this.apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          temperature: 0.7,
+          response_format: { type: 'json_object' },
+          messages: [
+            { role: 'system', content: ensuredSystem },
+            { role: 'user', content: userPrompt },
+          ],
+        }),
+      });
+
+      if (res.ok) {
+        const data = (await res.json()) as {
+          choices?: Array<{ message?: { content?: string } }>;
+        };
+        const rawText = data.choices?.[0]?.message?.content;
+        if (!rawText) {
+          errors.push(`${model}: empty completion`);
+          continue;
+        }
+        return parseJsonLoose<T>(rawText);
+      }
+
+      if (res.status === 401 || res.status === 403) {
+        throw new Error('Invalid Groq API key. Update your key in API Settings.');
+      }
+
+      const errText = await res.text().catch(() => '');
+      if (res.status === 429) {
+        errors.push(`${model}: HTTP 429`);
+        // Try fast fallback Groq model (e.g., llama-3.1-8b-instant) before giving up
+        if (i + 1 < this.models.length) {
+          continue;
+        }
+        throw new Error('Groq API quota or rate limit exceeded (HTTP 429).');
+      }
+
+      if (res.status === 404 && i + 1 < this.models.length) {
+        errors.push(`${model}: model unavailable (404)`);
+        continue;
+      }
+
+      throw new Error(`Groq request failed (${res.status}): ${sanitizeErrorMessage(errText)}`);
+    }
+
+    throw new Error(`Groq request failed (${errors.join('; ')})`);
+  }
+}
+
+export function isFailoverEligibleError(err: unknown): boolean {
+  const msg = sanitizeErrorMessage(err).toLowerCase();
+  return (
+    msg.includes('429') ||
+    msg.includes('quota') ||
+    msg.includes('rate limit') ||
+    msg.includes('resource_exhausted') ||
+    msg.includes('temporarily unavailable') ||
+    msg.includes('empty response') ||
+    msg.includes('empty completion') ||
+    msg.includes('(500)') ||
+    msg.includes('(502)') ||
+    msg.includes('(503)') ||
+    msg.includes('(504)') ||
+    msg.includes('timeout')
+  );
+}
+
+/**
+ * Wraps multiple configured AI providers so HTTP 429 / quota exhaustion on one provider
+ * (e.g., Gemini Free Tier after 3-4 videos) seamlessly fails over to the next configured provider
+ * (e.g., Groq) without aborting the pipeline.
+ */
+export class FallbackAIProvider implements AIProviderClient {
+  readonly name: string;
+
+  constructor(private readonly providers: AIProviderClient[]) {
+    this.name = providers.map((p) => p.name).join('>');
+  }
+
+  async generateJson<T>(systemPrompt: string, userPrompt: string): Promise<T> {
+    const errors: string[] = [];
+    for (let i = 0; i < this.providers.length; i++) {
+      const provider = this.providers[i];
+      try {
+        return await provider.generateJson<T>(systemPrompt, userPrompt);
+      } catch (err) {
+        const msg = sanitizeErrorMessage(err);
+        errors.push(`${provider.name}: ${msg}`);
+        const hasNext = i + 1 < this.providers.length;
+        if (hasNext && isFailoverEligibleError(err)) {
+          console.warn(
+            `[AutoTube AI] ${provider.name} hit limit/transient error (${msg}); failing over to ${this.providers[i + 1].name}.`
+          );
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw new Error(`All configured AI providers failed (${errors.join(' | ')})`);
+  }
+}
+
 export function parseJsonLoose<T>(text: string): T {
   const cleaned = text
     .trim()
@@ -272,37 +405,71 @@ export function parseJsonLoose<T>(text: string): T {
   return JSON.parse(cleaned) as T;
 }
 
+async function resolvePreferredLLMFromProfile(userId: string): Promise<LLMProviderName | null> {
+  try {
+    const supabase = getSupabaseAdmin();
+    const { data } = await supabase
+      .from('profiles')
+      .select('preferences')
+      .eq('user_id', userId)
+      .maybeSingle();
+    const prefs = (data?.preferences as Record<string, unknown>) || {};
+    const pref = String(prefs.script_provider || prefs.research_provider || '').trim().toLowerCase();
+    if (pref === 'groq' || pref === 'gemini' || pref === 'openai_compatible') {
+      return pref;
+    }
+  } catch {
+    // Non-fatal: fall back to default provider priority
+  }
+  return null;
+}
+
 export async function createAIProviderForUser(
   userId: string,
-  preferred: 'gemini' | 'openai_compatible' = 'gemini'
+  preferred?: LLMProviderName
 ): Promise<AIProviderClient> {
-  const primary = await resolveUserProviderKey(userId, preferred);
-  if (primary) {
-    if (preferred === 'openai_compatible') {
-      return new OpenAICompatibleProvider(
-        primary.apiKey,
-        String(primary.providerConfig.base_url || 'https://api.openai.com/v1'),
-        String(primary.providerConfig.model || 'gpt-4o-mini')
+  const selectedPrimary = preferred || (await resolvePreferredLLMFromProfile(userId)) || 'gemini';
+  const defaultOrder: LLMProviderName[] = ['groq', 'gemini', 'openai_compatible'];
+  const ordered: LLMProviderName[] = [
+    selectedPrimary,
+    ...defaultOrder.filter((p) => p !== selectedPrimary),
+  ];
+
+  const resolvedClients: AIProviderClient[] = [];
+  for (const name of ordered) {
+    const cred = await resolveUserProviderKey(userId, name);
+    if (!cred) continue;
+    if (name === 'groq') {
+      resolvedClients.push(
+        new GroqAIProvider(cred.apiKey, String(cred.providerConfig.model || DEFAULT_GROQ_MODEL))
+      );
+    } else if (name === 'openai_compatible') {
+      resolvedClients.push(
+        new OpenAICompatibleProvider(
+          cred.apiKey,
+          String(cred.providerConfig.base_url || 'https://api.openai.com/v1'),
+          String(cred.providerConfig.model || 'gpt-4o-mini')
+        )
+      );
+    } else {
+      resolvedClients.push(
+        new GeminiAIProvider(
+          cred.apiKey,
+          String(cred.providerConfig.model || 'gemini-2.5-flash')
+        )
       );
     }
-    return new GeminiAIProvider(
-      primary.apiKey,
-      String(primary.providerConfig.model || 'gemini-2.5-flash')
-    );
   }
 
-  // Fallback to alternate configured provider
-  const alt = preferred === 'gemini' ? 'openai_compatible' : 'gemini';
-  const secondary = await resolveUserProviderKey(userId, alt);
-  if (secondary) {
-    if (alt === 'openai_compatible') {
-      return new OpenAICompatibleProvider(secondary.apiKey);
-    }
-    return new GeminiAIProvider(secondary.apiKey);
+  if (resolvedClients.length === 1) {
+    return resolvedClients[0];
+  }
+  if (resolvedClients.length > 1) {
+    return new FallbackAIProvider(resolvedClients);
   }
 
   throw new Error(
-    'No AI provider key configured. Add your Gemini API key in Settings -> AI Providers & API Keys.'
+    'No AI provider key configured. Add your Groq or Gemini API key in Settings -> AI Providers & API Keys.'
   );
 }
 

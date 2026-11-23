@@ -63,15 +63,55 @@ private data class ProviderDisplaySpec(
     val id: String,
     val displayName: String,
     val roleLabel: String,
-    val defaultDocsUrl: String
+    val defaultDocsUrl: String,
+    val badgeText: String? = null,
+    val keyHint: String? = null
+)
+
+private val GROQ_MODEL_OPTIONS = listOf(
+    "llama-3.3-70b-versatile" to "Llama 3.3 70B (Best Quality)",
+    "llama-3.1-8b-instant" to "Llama 3.1 8B (Ultra High Limit)"
 )
 
 private val BYOK_PROVIDER_SPECS = listOf(
-    ProviderDisplaySpec("gemini", "Google Gemini", "Script, Research, Scene Breakdown & Gemini TTS", "https://aistudio.google.com/apikey"),
-    ProviderDisplaySpec("elevenlabs", "ElevenLabs", "Studio Voice-Over & Multilingual Narration", "https://elevenlabs.io/app/settings/api-keys"),
-    ProviderDisplaySpec("pexels", "Pexels", "HD Stock Video Clips & Portrait Shorts Footage", "https://www.pexels.com/api/"),
-    ProviderDisplaySpec("pixabay", "Pixabay", "Secondary Stock Video & Photography Source", "https://pixabay.com/api/docs/"),
-    ProviderDisplaySpec("openai_compatible", "OpenAI-Compatible", "Optional Alternative LLM Provider", "https://platform.openai.com/api-keys")
+    ProviderDisplaySpec(
+        id = "groq",
+        displayName = "Groq AI",
+        roleLabel = "Ultra-Fast Script, Research, Scenes & SEO • High Free Limit",
+        defaultDocsUrl = "https://console.groq.com/keys",
+        badgeText = "Recommended • Avoids 429",
+        keyHint = "gsk_..."
+    ),
+    ProviderDisplaySpec(
+        id = "gemini",
+        displayName = "Google Gemini",
+        roleLabel = "Script, Research, Scene Breakdown & Gemini TTS Voice-Over",
+        defaultDocsUrl = "https://aistudio.google.com/apikey"
+    ),
+    ProviderDisplaySpec(
+        id = "elevenlabs",
+        displayName = "ElevenLabs",
+        roleLabel = "Studio Voice-Over & Multilingual Narration",
+        defaultDocsUrl = "https://elevenlabs.io/app/settings/api-keys"
+    ),
+    ProviderDisplaySpec(
+        id = "pexels",
+        displayName = "Pexels",
+        roleLabel = "HD Stock Video Clips & Portrait Shorts Footage",
+        defaultDocsUrl = "https://www.pexels.com/api/"
+    ),
+    ProviderDisplaySpec(
+        id = "pixabay",
+        displayName = "Pixabay",
+        roleLabel = "Secondary Stock Video & Photography Source",
+        defaultDocsUrl = "https://pixabay.com/api/docs/"
+    ),
+    ProviderDisplaySpec(
+        id = "openai_compatible",
+        displayName = "OpenAI-Compatible",
+        roleLabel = "Optional Alternative LLM Provider",
+        defaultDocsUrl = "https://platform.openai.com/api-keys"
+    )
 )
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -81,8 +121,8 @@ fun ApiKeysScreen(
     credentials: List<CachedCredentialEntity>,
     uiState: StudioUiState,
     onRefresh: () -> Unit,
-    onValidateKey: (provider: String, rawKey: String) -> Unit,
-    onSaveKey: (provider: String, rawKey: String) -> Unit,
+    onValidateKey: (provider: String, rawKey: String, providerConfig: Map<String, Any>?) -> Unit,
+    onSaveKey: (provider: String, rawKey: String, providerConfig: Map<String, Any>?) -> Unit,
     onRemoveKey: (provider: String) -> Unit,
     onUpdateProviderRouting: (script: String, research: String, voice: String, media: String) -> Unit,
     onBack: () -> Unit
@@ -150,8 +190,8 @@ fun ApiKeysScreen(
                 spec = spec,
                 cached = byProvider[spec.id],
                 isBusy = uiState.validatingProvider == spec.id,
-                onValidate = { onValidateKey(spec.id, it) },
-                onSave = { onSaveKey(spec.id, it) },
+                onValidate = { key, cfg -> onValidateKey(spec.id, key, cfg) },
+                onSave = { key, cfg -> onSaveKey(spec.id, key, cfg) },
                 onRemove = { onRemoveKey(spec.id) }
             )
         }
@@ -168,16 +208,31 @@ fun ApiKeysScreen(
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Text("Preferred Provider Routing", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        text = "Tip: Connect both Groq & Gemini — if one hits a 429 rate limit, the cloud worker automatically fails over to the other.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
 
-                    Text("Script & Research", style = MaterialTheme.typography.labelLarge)
+                    Text("Script, Research & Scenes", style = MaterialTheme.typography.labelLarge)
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(
+                            selected = scriptProvider == "groq",
+                            onClick = {
+                                scriptProvider = "groq"
+                                researchProvider = "groq"
+                            },
+                            label = { Text("Groq (Fast • High Limit)") },
+                            modifier = Modifier.testTag("routing_chip_groq")
+                        )
                         FilterChip(
                             selected = scriptProvider == "gemini",
                             onClick = {
                                 scriptProvider = "gemini"
                                 researchProvider = "gemini"
                             },
-                            label = { Text("Gemini") }
+                            label = { Text("Gemini") },
+                            modifier = Modifier.testTag("routing_chip_gemini")
                         )
                         FilterChip(
                             selected = scriptProvider == "openai_compatible",
@@ -185,7 +240,8 @@ fun ApiKeysScreen(
                                 scriptProvider = "openai_compatible"
                                 researchProvider = "openai_compatible"
                             },
-                            label = { Text("OpenAI-Compatible") }
+                            label = { Text("OpenAI-Compatible") },
+                            modifier = Modifier.testTag("routing_chip_openai_compatible")
                         )
                     }
 
@@ -241,24 +297,34 @@ fun ApiKeysScreen(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ProviderApiKeyCard(
     spec: ProviderDisplaySpec,
     cached: CachedCredentialEntity?,
     isBusy: Boolean,
-    onValidate: (String) -> Unit,
-    onSave: (String) -> Unit,
+    onValidate: (String, Map<String, Any>?) -> Unit,
+    onSave: (String, Map<String, Any>?) -> Unit,
     onRemove: () -> Unit
 ) {
     val context = LocalContext.current
     var keyInput by remember(spec.id) { mutableStateOf("") }
+    var selectedGroqModel by remember(spec.id) { mutableStateOf(GROQ_MODEL_OPTIONS.first().first) }
     val status = if (isBusy) "validating" else (cached?.status ?: "not_connected")
     val docsUrl = cached?.docsUrl?.ifBlank { spec.defaultDocsUrl } ?: spec.defaultDocsUrl
+    val currentConfig: Map<String, Any>? = if (spec.id == "groq") {
+        mapOf("model" to selectedGroqModel)
+    } else {
+        null
+    }
 
     Card(
         shape = MaterialTheme.shapes.medium,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+        border = BorderStroke(
+            width = 1.dp,
+            color = if (spec.id == "groq") PipelineCyan.copy(alpha = 0.55f) else MaterialTheme.colorScheme.outline
+        )
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
@@ -271,6 +337,13 @@ private fun ProviderApiKeyCard(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(spec.displayName, style = MaterialTheme.typography.titleMedium)
+                    spec.badgeText?.let { badge ->
+                        Text(
+                            text = badge,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = PipelineCyan
+                        )
+                    }
                     Text(
                         text = spec.roleLabel,
                         style = MaterialTheme.typography.bodySmall,
@@ -304,10 +377,25 @@ private fun ProviderApiKeyCard(
                 )
             }
 
+            if (spec.id == "groq") {
+                Text("Groq Model", style = MaterialTheme.typography.labelMedium)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    GROQ_MODEL_OPTIONS.forEach { (modelId, label) ->
+                        FilterChip(
+                            selected = selectedGroqModel == modelId,
+                            onClick = { selectedGroqModel = modelId },
+                            label = { Text(label) },
+                            modifier = Modifier.testTag("groq_model_chip_$modelId")
+                        )
+                    }
+                }
+            }
+
             OutlinedTextField(
                 value = keyInput,
                 onValueChange = { keyInput = it },
                 label = { Text("Enter ${spec.displayName} API Key") },
+                placeholder = spec.keyHint?.let { hint -> { Text(hint) } },
                 visualTransformation = PasswordVisualTransformation(),
                 singleLine = true,
                 modifier = Modifier
@@ -321,7 +409,7 @@ private fun ProviderApiKeyCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 OutlinedButton(
-                    onClick = { onValidate(keyInput) },
+                    onClick = { onValidate(keyInput, currentConfig) },
                     enabled = !isBusy && keyInput.isNotBlank(),
                     modifier = Modifier
                         .weight(1f)
@@ -339,7 +427,7 @@ private fun ProviderApiKeyCard(
 
                 Button(
                     onClick = {
-                        onSave(keyInput)
+                        onSave(keyInput, currentConfig)
                         keyInput = ""
                     },
                     enabled = !isBusy && keyInput.isNotBlank(),

@@ -18,6 +18,7 @@ export interface AppConfig {
   androidOAuthCallbackUri: string;
   optionalPlatformKeys: {
     gemini?: string;
+    groq?: string;
     pexels?: string;
     pixabay?: string;
     elevenlabs?: string;
@@ -61,6 +62,7 @@ export function loadConfig(): AppConfig {
       process.env.ANDROID_OAUTH_CALLBACK_URI?.trim() || 'autotubestudio://oauth/youtube',
     optionalPlatformKeys: {
       gemini: process.env.GOOGLE_GEMINI_API_KEY?.trim() || undefined,
+      groq: process.env.GROQ_API_KEY?.trim() || undefined,
       pexels: process.env.PEXELS_API_KEY?.trim() || undefined,
       pixabay: process.env.PIXABAY_API_KEY?.trim() || undefined,
       elevenlabs: process.env.ELEVENLABS_API_KEY?.trim() || undefined,
@@ -89,6 +91,7 @@ export function sanitizeErrorMessage(input: unknown): string {
   const raw = input instanceof Error ? input.message : String(input ?? 'Unknown error');
   return raw
     .replace(/AIza[0-9A-Za-z\-_]{20,}/g, '[REDACTED_GOOGLE_KEY]')
+    .replace(/gsk_[0-9A-Za-z\-_]{16,}/g, '[REDACTED_GROQ_KEY]')
     .replace(/sk-[0-9A-Za-z\-_]{16,}/g, '[REDACTED_API_KEY]')
     .replace(/Bearer\s+[A-Za-z0-9\-._~+/]+=*/gi, 'Bearer [REDACTED]')
     .replace(/(key|token|secret|password)=([^&\s]+)/gi, '$1=[REDACTED]')

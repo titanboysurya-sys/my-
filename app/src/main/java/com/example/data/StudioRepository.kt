@@ -14,6 +14,7 @@ import com.example.core.network.CredentialInputRequest
 import com.example.core.network.DashboardResponse
 import com.example.core.network.DynamicBackendClient
 import com.example.core.network.HealthResponse
+import com.example.core.network.ProfilePreferencesRequest
 import com.example.core.network.ProjectDetailResponse
 import com.example.core.network.RegenerateScriptRequest
 import com.example.core.network.SaveCredentialResponse
@@ -104,8 +105,39 @@ class StudioRepository(
         researchProvider: String,
         voiceProvider: String,
         mediaProviders: String
-    ) {
+    ): Result<Unit> {
         prefsStore.updateProviderRouting(scriptProvider, researchProvider, voiceProvider, mediaProviders)
+        return safeApiCall {
+            val mediaList = mediaProviders.split(",").map { it.trim() }.filter { it.isNotBlank() }
+            client.backendApi().updateProfilePreferences(
+                ProfilePreferencesRequest(
+                    preferences = mapOf(
+                        "script_provider" to scriptProvider,
+                        "research_provider" to researchProvider,
+                        "voice_provider" to voiceProvider,
+                        "media_providers" to mediaList
+                    )
+                )
+            )
+            Unit
+        }
+    }
+
+    suspend fun syncProfilePreferences(): Result<Unit> = safeApiCall {
+        val prefs = client.backendApi().getProfile().profile?.preferences ?: return@safeApiCall
+        val current = prefsStore.currentSettings()
+        val script = (prefs["script_provider"] as? String)?.takeIf { it.isNotBlank() }
+            ?: current.preferredScriptProvider
+        val research = (prefs["research_provider"] as? String)?.takeIf { it.isNotBlank() }
+            ?: current.preferredResearchProvider
+        val voice = (prefs["voice_provider"] as? String)?.takeIf { it.isNotBlank() }
+            ?: current.preferredVoiceProvider
+        val media = when (val raw = prefs["media_providers"]) {
+            is List<*> -> raw.filterIsInstance<String>().joinToString(",").ifBlank { current.preferredMediaProviders }
+            is String -> raw.ifBlank { current.preferredMediaProviders }
+            else -> current.preferredMediaProviders
+        }
+        prefsStore.updateProviderRouting(script, research, voice, media)
     }
 
     suspend fun checkBackendHealth(overrideUrl: String? = null): Result<HealthResponse> =
@@ -447,17 +479,33 @@ class StudioRepository(
         )
     }
 
-    suspend fun validateApiKey(provider: String, apiKey: String): Result<ValidateCredentialResponse> =
+    suspend fun validateApiKey(
+        provider: String,
+        apiKey: String,
+        providerConfig: Map<String, Any>? = null
+    ): Result<ValidateCredentialResponse> =
         safeApiCall {
             client.backendApi().validateCredential(
-                CredentialInputRequest(provider = provider, apiKey = apiKey)
+                CredentialInputRequest(
+                    provider = provider,
+                    apiKey = apiKey,
+                    providerConfig = providerConfig
+                )
             )
         }
 
-    suspend fun saveApiKey(provider: String, apiKey: String): Result<SaveCredentialResponse> =
+    suspend fun saveApiKey(
+        provider: String,
+        apiKey: String,
+        providerConfig: Map<String, Any>? = null
+    ): Result<SaveCredentialResponse> =
         safeApiCall {
             val res = client.backendApi().saveCredential(
-                CredentialInputRequest(provider = provider, apiKey = apiKey)
+                CredentialInputRequest(
+                    provider = provider,
+                    apiKey = apiKey,
+                    providerConfig = providerConfig
+                )
             )
             refreshCredentials()
             res

@@ -380,8 +380,12 @@ private fun AutoTubeStudioRoot(viewModel: StudioViewModel) {
                                     credentials = credentials,
                                     uiState = uiState,
                                     onRefresh = viewModel::refreshCredentials,
-                                    onValidateKey = viewModel::validateApiKey,
-                                    onSaveKey = viewModel::saveApiKey,
+                                    onValidateKey = { provider, rawKey, cfg ->
+                                        viewModel.validateApiKey(provider, rawKey, cfg)
+                                    },
+                                    onSaveKey = { provider, rawKey, cfg ->
+                                        viewModel.saveApiKey(provider, rawKey, cfg)
+                                    },
                                     onRemoveKey = viewModel::removeApiKey,
                                     onUpdateProviderRouting = viewModel::updateProviderRouting,
                                     onBack = { navController.popBackStack() }

@@ -4,10 +4,14 @@ import { decryptSecret, encryptSecret, maskApiKey } from '../security/crypto.js'
 
 export type SupportedProvider =
   | 'gemini'
+  | 'groq'
   | 'openai_compatible'
   | 'elevenlabs'
   | 'pexels'
   | 'pixabay';
+
+export const GROQ_BASE_URL = 'https://api.groq.com/openai/v1';
+export const DEFAULT_GROQ_MODEL = 'llama-3.3-70b-versatile';
 
 export type CredentialStatus =
   | 'not_connected'
@@ -37,11 +41,24 @@ export interface MaskedCredentialRecord {
 
 export const PROVIDER_DOCS: Record<SupportedProvider, string> = {
   gemini: 'https://aistudio.google.com/apikey',
+  groq: 'https://console.groq.com/keys',
   openai_compatible: 'https://platform.openai.com/api-keys',
   elevenlabs: 'https://elevenlabs.io/app/settings/api-keys',
   pexels: 'https://www.pexels.com/api/',
   pixabay: 'https://pixabay.com/api/docs/',
 };
+
+function sanitizeGroqModel(raw: unknown): string {
+  const candidate = typeof raw === 'string' ? raw.trim() : '';
+  return /^[a-zA-Z0-9._/-]{2,80}$/.test(candidate) ? candidate : DEFAULT_GROQ_MODEL;
+}
+
+function isProviderCheckConstraintError(err: { code?: string; message?: string } | null): boolean {
+  if (!err) return false;
+  if (err.code === '23514') return true;
+  const msg = (err.message || '').toLowerCase();
+  return msg.includes('api_credentials_provider_check') || msg.includes('check constraint');
+}
 
 /**
  * Validates a raw API key directly against the real provider endpoint without logging the key.
@@ -76,6 +93,28 @@ export async function validateProviderKey(
           };
         }
         return mapHttpStatusToValidation(res.status, 'Gemini');
+      }
+
+      case 'groq': {
+        const res = await fetch(`${GROQ_BASE_URL}/models`, {
+          method: 'GET',
+          headers: { Authorization: `Bearer ${key}` },
+          signal: controller.signal,
+        });
+        if (res.ok) {
+          const data = (await res.json()) as { data?: Array<{ id?: string }> };
+          const defaultModel = sanitizeGroqModel(providerConfig.model);
+          return {
+            valid: true,
+            status: 'connected',
+            message: 'Groq API key verified.',
+            usageInfo: {
+              availableModels: data.data?.length ?? 0,
+              model: defaultModel,
+            },
+          };
+        }
+        return mapHttpStatusToValidation(res.status, 'Groq');
       }
 
       case 'openai_compatible': {
@@ -212,12 +251,22 @@ export async function listUserCredentials(userId: string): Promise<MaskedCredent
     throw new Error(`Failed to fetch credentials: ${error.message}`);
   }
 
-  const byProvider = new Map(
-    (data || []).map((row) => [row.provider as SupportedProvider, row])
-  );
+  const byProvider = new Map<SupportedProvider, (typeof data)[number]>();
+  for (const row of data || []) {
+    const prov = row.provider as SupportedProvider;
+    const cfg = (row.provider_config as Record<string, unknown>) || {};
+    if (prov === 'openai_compatible' && cfg.preset === 'groq') {
+      if (!byProvider.has('groq')) {
+        byProvider.set('groq', row);
+      }
+      continue;
+    }
+    byProvider.set(prov, row);
+  }
 
   const orderedProviders: SupportedProvider[] = [
     'gemini',
+    'groq',
     'elevenlabs',
     'pexels',
     'pixabay',
@@ -269,6 +318,16 @@ export async function upsertUserCredential(
     };
   }
 
+  const normalizedConfig: Record<string, unknown> =
+    provider === 'groq'
+      ? {
+          ...providerConfig,
+          preset: 'groq',
+          base_url: GROQ_BASE_URL,
+          model: sanitizeGroqModel(providerConfig.model),
+        }
+      : providerConfig;
+
   const encrypted = encryptSecret(
     rawKey.trim(),
     config.credentialEncryptionKeyHex,
@@ -278,7 +337,7 @@ export async function upsertUserCredential(
   const now = new Date().toISOString();
 
   const supabase = getSupabaseAdmin();
-  const { error } = await supabase.from('api_credentials').upsert(
+  let { error } = await supabase.from('api_credentials').upsert(
     {
       user_id: userId,
       provider,
@@ -287,13 +346,41 @@ export async function upsertUserCredential(
       key_auth_tag: encrypted.authTag,
       masked_key: masked,
       key_status: validation.status,
-      provider_config: providerConfig,
+      provider_config: normalizedConfig,
       usage_info: validation.usageInfo || {},
       last_validated_at: now,
       last_error: validation.valid ? null : validation.message,
     },
     { onConflict: 'user_id,provider' }
   );
+
+  // Zero-migration compatibility: if an existing Supabase DB hasn't run 003_add_groq_provider.sql yet,
+  // securely store the encrypted Groq credential in the server-only api_credentials table under
+  // openai_compatible with preset='groq' (same AES-256-GCM encryption & RLS deny-all protection).
+  if (error && provider === 'groq' && isProviderCheckConstraintError(error)) {
+    const fallbackEncrypted = encryptSecret(
+      rawKey.trim(),
+      config.credentialEncryptionKeyHex,
+      `${userId}:openai_compatible`
+    );
+    const fallbackRes = await supabase.from('api_credentials').upsert(
+      {
+        user_id: userId,
+        provider: 'openai_compatible',
+        encrypted_key: fallbackEncrypted.ciphertext,
+        key_iv: fallbackEncrypted.iv,
+        key_auth_tag: fallbackEncrypted.authTag,
+        masked_key: masked,
+        key_status: validation.status,
+        provider_config: normalizedConfig,
+        usage_info: validation.usageInfo || {},
+        last_validated_at: now,
+        last_error: validation.valid ? null : validation.message,
+      },
+      { onConflict: 'user_id,provider' }
+    );
+    error = fallbackRes.error;
+  }
 
   if (error) {
     throw new Error(`Failed to save encrypted credential: ${error.message}`);
@@ -308,7 +395,7 @@ export async function upsertUserCredential(
       lastValidatedAt: now,
       lastError: validation.valid ? null : validation.message,
       usageInfo: validation.usageInfo || {},
-      providerConfig,
+      providerConfig: normalizedConfig,
       docsUrl: PROVIDER_DOCS[provider],
     },
   };
@@ -330,6 +417,23 @@ export async function deleteUserCredential(
   if (error) {
     throw new Error(`Failed to remove credential: ${error.message}`);
   }
+
+  if (provider === 'groq') {
+    const { data: compatRow } = await supabase
+      .from('api_credentials')
+      .select('provider_config')
+      .eq('user_id', userId)
+      .eq('provider', 'openai_compatible')
+      .maybeSingle();
+    const cfg = (compatRow?.provider_config as Record<string, unknown>) || {};
+    if (cfg.preset === 'groq') {
+      await supabase
+        .from('api_credentials')
+        .delete()
+        .eq('user_id', userId)
+        .eq('provider', 'openai_compatible');
+    }
+  }
 }
 
 /**
@@ -349,23 +453,55 @@ export async function resolveUserProviderKey(
     .maybeSingle();
 
   if (data?.encrypted_key && data.key_iv && data.key_auth_tag) {
-    const apiKey = decryptSecret(
-      {
-        ciphertext: data.encrypted_key,
-        iv: data.key_iv,
-        authTag: data.key_auth_tag,
-      },
-      config.credentialEncryptionKeyHex,
-      `${userId}:${provider}`
-    );
-    return {
-      apiKey,
-      providerConfig: (data.provider_config as Record<string, unknown>) || {},
-    };
+    const cfg = (data.provider_config as Record<string, unknown>) || {};
+    // Avoid treating a compat-fallback Groq row as a generic OpenAI-compatible key
+    if (provider === 'openai_compatible' && cfg.preset === 'groq') {
+      // handled under 'groq' instead
+    } else {
+      const apiKey = decryptSecret(
+        {
+          ciphertext: data.encrypted_key,
+          iv: data.key_iv,
+          authTag: data.key_auth_tag,
+        },
+        config.credentialEncryptionKeyHex,
+        `${userId}:${provider}`
+      );
+      return { apiKey, providerConfig: cfg };
+    }
+  }
+
+  // Zero-migration fallback lookup for Groq stored under openai_compatible(preset='groq')
+  if (provider === 'groq') {
+    const { data: compatRow } = await supabase
+      .from('api_credentials')
+      .select('encrypted_key, key_iv, key_auth_tag, provider_config')
+      .eq('user_id', userId)
+      .eq('provider', 'openai_compatible')
+      .maybeSingle();
+    const cfg = (compatRow?.provider_config as Record<string, unknown>) || {};
+    if (
+      cfg.preset === 'groq' &&
+      compatRow?.encrypted_key &&
+      compatRow.key_iv &&
+      compatRow.key_auth_tag
+    ) {
+      const apiKey = decryptSecret(
+        {
+          ciphertext: compatRow.encrypted_key,
+          iv: compatRow.key_iv,
+          authTag: compatRow.key_auth_tag,
+        },
+        config.credentialEncryptionKeyHex,
+        `${userId}:openai_compatible`
+      );
+      return { apiKey, providerConfig: cfg };
+    }
   }
 
   const fallbackMap: Partial<Record<SupportedProvider, string | undefined>> = {
     gemini: config.optionalPlatformKeys.gemini,
+    groq: config.optionalPlatformKeys.groq,
     pexels: config.optionalPlatformKeys.pexels,
     pixabay: config.optionalPlatformKeys.pixabay,
     elevenlabs: config.optionalPlatformKeys.elevenlabs,

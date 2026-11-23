@@ -80,7 +80,7 @@ CREATE TABLE IF NOT EXISTS public.api_credentials (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   provider TEXT NOT NULL CHECK (
-    provider IN ('gemini', 'openai_compatible', 'elevenlabs', 'pexels', 'pixabay')
+    provider IN ('gemini', 'groq', 'openai_compatible', 'elevenlabs', 'pexels', 'pixabay')
   ),
   encrypted_key TEXT NOT NULL,
   key_iv TEXT NOT NULL,

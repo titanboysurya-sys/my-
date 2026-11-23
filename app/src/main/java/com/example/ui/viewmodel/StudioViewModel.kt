@@ -330,8 +330,11 @@ class StudioViewModel(
                 researchProvider,
                 voiceProvider,
                 mediaProviders
-            )
-            showInfo("Preferred provider routing updated")
+            ).onSuccess {
+                showInfo("Preferred provider routing synced to cloud")
+            }.onFailure { err ->
+                showInfo("Saved locally (cloud sync pending: ${err.message ?: "offline"})")
+            }
         }
     }
 
@@ -413,7 +416,7 @@ class StudioViewModel(
                         )
                     }
                     if (resp.suggestions.isEmpty()) {
-                        showInfo("No topics returned — try a broader niche or check Gemini API key.")
+                        showInfo("No topics returned — try a broader niche or check your Groq/Gemini API key.")
                     }
                 }
                 .onFailure { err ->
@@ -516,17 +519,22 @@ class StudioViewModel(
     fun refreshCredentials() {
         viewModelScope.launch {
             repository.refreshCredentials()
+            repository.syncProfilePreferences()
         }
     }
 
-    fun validateApiKey(provider: String, rawKey: String) {
+    fun validateApiKey(
+        provider: String,
+        rawKey: String,
+        providerConfig: Map<String, Any>? = null
+    ) {
         if (rawKey.trim().length < 8) {
             showError("Enter a valid API key before validating.")
             return
         }
         viewModelScope.launch {
             _uiState.update { it.copy(validatingProvider = provider) }
-            repository.validateApiKey(provider, rawKey)
+            repository.validateApiKey(provider, rawKey, providerConfig)
                 .onSuccess { resp ->
                     _uiState.update { it.copy(validatingProvider = null) }
                     if (resp.validation.valid) {
@@ -542,18 +550,33 @@ class StudioViewModel(
         }
     }
 
-    fun saveApiKey(provider: String, rawKey: String) {
+    fun saveApiKey(
+        provider: String,
+        rawKey: String,
+        providerConfig: Map<String, Any>? = null
+    ) {
         if (rawKey.trim().length < 8) {
             showError("Enter a valid API key to save.")
             return
         }
         viewModelScope.launch {
             _uiState.update { it.copy(validatingProvider = provider) }
-            repository.saveApiKey(provider, rawKey)
+            repository.saveApiKey(provider, rawKey, providerConfig)
                 .onSuccess { resp ->
                     _uiState.update { it.copy(validatingProvider = null) }
                     if (resp.validation.valid) {
-                        showInfo("${provider.uppercase()} key encrypted & saved on backend")
+                        if (provider == "groq") {
+                            val current = appSettings.value
+                            repository.updateProviderRouting(
+                                scriptProvider = "groq",
+                                researchProvider = "groq",
+                                voiceProvider = current.preferredVoiceProvider,
+                                mediaProviders = current.preferredMediaProviders
+                            )
+                            showInfo("GROQ key encrypted & saved! Script & Research set to Groq (auto-failover active).")
+                        } else {
+                            showInfo("${provider.uppercase()} key encrypted & saved on backend")
+                        }
                     } else {
                         showError(resp.validation.message)
                     }

@@ -36,7 +36,7 @@ import {
 
 export const apiRouter = Router();
 
-const providerEnum = z.enum(['gemini', 'openai_compatible', 'elevenlabs', 'pexels', 'pixabay']);
+const providerEnum = z.enum(['gemini', 'groq', 'openai_compatible', 'elevenlabs', 'pexels', 'pixabay']);
 
 function escapeHtml(text: string): string {
   return text
@@ -235,12 +235,21 @@ apiRouter.put('/profile/preferences', async (req: AuthenticatedRequest, res: Res
     });
     const parsed = schema.parse(req.body);
     const supabase = getSupabaseAdmin();
+    const { data: existingProfile } = await supabase
+      .from('profiles')
+      .select('preferences')
+      .eq('user_id', userId)
+      .maybeSingle();
+    const mergedPrefs = {
+      ...((existingProfile?.preferences as Record<string, unknown>) || {}),
+      ...parsed.preferences,
+    };
     const { data, error } = await supabase
       .from('profiles')
       .upsert(
         {
           user_id: userId,
-          preferences: parsed.preferences,
+          preferences: mergedPrefs,
           ...(parsed.displayName ? { display_name: parsed.displayName } : {}),
         },
         { onConflict: 'user_id' }
@@ -454,7 +463,7 @@ apiRouter.post('/research/topics', sensitiveRateLimiter, async (req: Authenticat
       count: z.number().int().min(1).max(10).default(5),
     });
     const parsed = schema.parse(req.body);
-    const ai = await createAIProviderForUser(userId, 'gemini');
+    const ai = await createAIProviderForUser(userId);
     const researched = await researchTopicsWithAI(ai, parsed);
     res.json(researched);
   } catch (err) {
@@ -736,7 +745,7 @@ apiRouter.post('/projects/:id/script/regenerate', sensitiveRateLimiter, async (r
       return;
     }
 
-    const ai = await createAIProviderForUser(userId, 'gemini');
+    const ai = await createAIProviderForUser(userId);
     const generated = await generateScriptWithAI(ai, {
       topic: project.topic,
       niche: project.niche,

@@ -10,7 +10,12 @@ import {
 } from '../src/security/crypto.js';
 import { assertSafeExternalUrl, resolveConfinedPath } from '../src/security/urlGuard.js';
 import { sanitizeErrorMessage } from '../src/config/env.js';
-import { resolveLanguageMeta, targetWordRangeForDuration } from '../src/services/aiProvider.js';
+import {
+  FallbackAIProvider,
+  resolveLanguageMeta,
+  targetWordRangeForDuration,
+  type AIProviderClient,
+} from '../src/services/aiProvider.js';
 import { scoreMediaCandidate, type MediaCandidate } from '../src/services/mediaSearchService.js';
 import { wrapPcm16AsWav } from '../src/services/voiceService.js';
 import {
@@ -264,4 +269,38 @@ test('Language resolver maps Hindi and Hinglish strictly to explicit instruction
   assert.equal(hinglish.code, 'hinglish');
   assert.ok(hinglish.scriptInstruction.includes('Roman'));
 });
+
+test('Groq API key redaction, permanent error detection, and 429 failover to Groq work reliably', async () => {
+  const leaked = 'Authorization failed for gsk_FakeGroqSecretKey1234567890abcd';
+  const cleaned = sanitizeErrorMessage(leaked);
+  assert.ok(!cleaned.includes('gsk_FakeGroqSecretKey'));
+  assert.ok(cleaned.includes('[REDACTED_GROQ_KEY]'));
+
+  assert.equal(isPermanentError('Invalid Groq API key. Update your key in API Settings.'), true);
+
+  let groqCalled = false;
+  const rateLimitedGemini: AIProviderClient = {
+    name: 'gemini',
+    async generateJson() {
+      throw new Error('Gemini API quota or rate limit exceeded (HTTP 429).');
+    },
+  };
+  const healthyGroq: AIProviderClient = {
+    name: 'groq',
+    async generateJson<T>() {
+      groqCalled = true;
+      return { ok: true, provider: 'groq' } as T;
+    },
+  };
+
+  const fallback = new FallbackAIProvider([rateLimitedGemini, healthyGroq]);
+  const result = await fallback.generateJson<{ ok: boolean; provider: string }>(
+    'Return JSON',
+    'test'
+  );
+  assert.equal(groqCalled, true);
+  assert.equal(result.ok, true);
+  assert.equal(result.provider, 'groq');
+});
+
 

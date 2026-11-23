@@ -77,6 +77,7 @@ export function isPermanentError(message: string): boolean {
   const lower = message.toLowerCase();
   return (
     lower.includes('invalid gemini api key') ||
+    lower.includes('invalid groq api key') ||
     lower.includes('invalid api key') ||
     lower.includes('no ai provider key') ||
     lower.includes('revoked') ||
@@ -171,7 +172,7 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
       body: `Cloud pipeline started for "${project.title || project.topic}".`,
     });
 
-    const ai = await createAIProviderForUser(job.user_id, 'gemini');
+    const ai = await createAIProviderForUser(job.user_id);
     let references: ResearchReference[] = Array.isArray(project.research_references)
       ? project.research_references
       : [];

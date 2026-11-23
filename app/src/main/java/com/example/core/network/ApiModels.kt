@@ -66,6 +66,26 @@ data class DashboardResponse(
     val recentNotifications: List<NotificationDto> = emptyList()
 )
 
+// --- Profile & Cloud Preferences ---
+@JsonClass(generateAdapter = true)
+data class ProfileDto(
+    val id: String = "",
+    @Json(name = "user_id") val userId: String = "",
+    @Json(name = "display_name") val displayName: String = "",
+    val preferences: Map<String, Any?>? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class ProfileResponse(
+    val profile: ProfileDto? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class ProfilePreferencesRequest(
+    val preferences: Map<String, Any>,
+    val displayName: String? = null
+)
+
 // --- BYOK Credentials ---
 @JsonClass(generateAdapter = true)
 data class MaskedCredentialDto(

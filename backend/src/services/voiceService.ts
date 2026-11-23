@@ -141,31 +141,48 @@ async function generateWithGeminiTts(
   )}`;
 
   const langMeta = resolveLanguageMeta(req.language);
-  const res = await fetch(endpoint, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: [
-        {
-          parts: [
-            {
-              text: `Read the following narration aloud naturally in ${langMeta.ttsName} with authentic native pronunciation and clear expressive pacing (${req.speed}x speed). Speak ONLY the script text below without adding any extra words:\n\n${req.text}`,
-            },
-          ],
-        },
-      ],
-      generationConfig: {
-        responseModalities: ['AUDIO'],
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: { voiceName },
+  const requestBody = JSON.stringify({
+    contents: [
+      {
+        parts: [
+          {
+            text: `Read the following narration aloud naturally in ${langMeta.ttsName} with authentic native pronunciation and clear expressive pacing (${req.speed}x speed). Speak ONLY the script text below without adding any extra words:\n\n${req.text}`,
           },
+        ],
+      },
+    ],
+    generationConfig: {
+      responseModalities: ['AUDIO'],
+      speechConfig: {
+        voiceConfig: {
+          prebuiltVoiceConfig: { voiceName },
         },
       },
-    }),
+    },
   });
 
+  let res = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: requestBody,
+  });
+
+  if (res.status === 429) {
+    // Brief single backoff handles per-minute (RPM) bursts on Gemini Free Tier
+    await new Promise((resolve) => setTimeout(resolve, 4000));
+    res = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: requestBody,
+    });
+  }
+
   if (!res.ok) {
+    if (res.status === 429) {
+      throw new Error(
+        'Gemini TTS rate limit reached (HTTP 429). Wait a moment or add ElevenLabs in API Settings for voice-over.'
+      );
+    }
     throw new Error(`Gemini TTS HTTP ${res.status}`);
   }
 

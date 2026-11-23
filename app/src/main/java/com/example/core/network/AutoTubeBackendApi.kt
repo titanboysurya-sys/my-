@@ -14,6 +14,12 @@ interface AutoTubeBackendApi {
     @GET("api/dashboard")
     suspend fun getDashboard(): DashboardResponse
 
+    @GET("api/profile")
+    suspend fun getProfile(): ProfileResponse
+
+    @PUT("api/profile/preferences")
+    suspend fun updateProfilePreferences(@Body request: ProfilePreferencesRequest): ProfileResponse
+
     // BYOK Credentials
     @GET("api/credentials")
     suspend fun getCredentials(): CredentialsListResponse

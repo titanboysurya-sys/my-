@@ -1,6 +1,15 @@
 import { config, sanitizeErrorMessage } from '../config/env.js';
 import { getSupabaseAdmin } from '../db/supabase.js';
 import { decryptSecret, encryptSecret, maskApiKey } from '../security/crypto.js';
+import {
+  GROQ_BASE_URL,
+  rankGeminiTextModels,
+  rankGroqChatModels,
+  type GeminiRawModel,
+  type GroqRawModel,
+} from './modelResolver.js';
+
+export { GROQ_BASE_URL };
 
 export type SupportedProvider =
   | 'gemini'
@@ -10,8 +19,7 @@ export type SupportedProvider =
   | 'pexels'
   | 'pixabay';
 
-export const GROQ_BASE_URL = 'https://api.groq.com/openai/v1';
-export const DEFAULT_GROQ_MODEL = 'llama-3.3-70b-versatile';
+export const DEFAULT_GROQ_MODEL = 'auto';
 
 export type CredentialStatus =
   | 'not_connected'
@@ -80,16 +88,21 @@ export async function validateProviderKey(
     switch (provider) {
       case 'gemini': {
         const res = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models?pageSize=5&key=${encodeURIComponent(key)}`,
+          `https://generativelanguage.googleapis.com/v1beta/models?pageSize=100&key=${encodeURIComponent(key)}`,
           { method: 'GET', signal: controller.signal }
         );
         if (res.ok) {
-          const data = (await res.json()) as { models?: Array<{ name?: string }> };
+          const data = (await res.json()) as { models?: GeminiRawModel[] };
+          const ranked = rankGeminiTextModels(data.models || []);
+          const activeModel = ranked[0] || 'auto';
           return {
             valid: true,
             status: 'connected',
-            message: 'Gemini API key verified.',
-            usageInfo: { availableModelsSample: data.models?.length ?? 0 },
+            message: `Gemini API key verified (Active: ${activeModel}).`,
+            usageInfo: {
+              activeModel,
+              availableModels: ranked.length,
+            },
           };
         }
         return mapHttpStatusToValidation(res.status, 'Gemini');
@@ -102,15 +115,17 @@ export async function validateProviderKey(
           signal: controller.signal,
         });
         if (res.ok) {
-          const data = (await res.json()) as { data?: Array<{ id?: string }> };
-          const defaultModel = sanitizeGroqModel(providerConfig.model);
+          const data = (await res.json()) as { data?: GroqRawModel[] };
+          const preference = sanitizeGroqModel(providerConfig.model);
+          const ranked = rankGroqChatModels(data.data || [], preference);
+          const activeModel = ranked[0] || 'auto';
           return {
             valid: true,
             status: 'connected',
-            message: 'Groq API key verified.',
+            message: `Groq API key verified (Active: ${activeModel}).`,
             usageInfo: {
-              availableModels: data.data?.length ?? 0,
-              model: defaultModel,
+              activeModel,
+              availableModels: ranked.length,
             },
           };
         }

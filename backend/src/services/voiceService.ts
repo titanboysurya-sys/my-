@@ -6,6 +6,11 @@ import { uploadToStorageWithAutoBucket } from '../db/supabase.js';
 import { resolveConfinedPath } from '../security/urlGuard.js';
 import { resolveLanguageMeta } from './aiProvider.js';
 import { resolveUserProviderKey } from './credentialService.js';
+import {
+  isModelRetiredOrUnsupportedError,
+  markGeminiTtsModelRetired,
+  resolveActiveGeminiTtsModels,
+} from './modelResolver.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -136,10 +141,6 @@ async function generateWithGeminiTts(
   const validGeminiVoices = new Set(['Kore', 'Puck', 'Charon', 'Fenrir', 'Aoede', 'Zephyr']);
   const voiceName = validGeminiVoices.has(req.voiceId) ? req.voiceId : 'Kore';
 
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${encodeURIComponent(
-    cred.apiKey
-  )}`;
-
   const langMeta = resolveLanguageMeta(req.language);
   const requestBody = JSON.stringify({
     contents: [
@@ -161,59 +162,95 @@ async function generateWithGeminiTts(
     },
   });
 
-  let res = await fetch(endpoint, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: requestBody,
-  });
+  const ttsModels = (await resolveActiveGeminiTtsModels(cred.apiKey)).slice(0, 4);
+  const errors: string[] = [];
+  let sawRateLimit = false;
 
-  if (res.status === 429) {
-    // Brief single backoff handles per-minute (RPM) bursts on Gemini Free Tier
-    await new Promise((resolve) => setTimeout(resolve, 4000));
-    res = await fetch(endpoint, {
+  for (let i = 0; i < ttsModels.length; i++) {
+    const model = ttsModels[i];
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+      model
+    )}:generateContent?key=${encodeURIComponent(cred.apiKey)}`;
+
+    let res = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: requestBody,
     });
-  }
 
-  if (!res.ok) {
     if (res.status === 429) {
-      throw new Error(
-        'Gemini TTS rate limit reached (HTTP 429). Wait a moment or add ElevenLabs in API Settings for voice-over.'
-      );
+      sawRateLimit = true;
+      // Brief single backoff handles per-minute (RPM) bursts on Gemini Free Tier
+      await new Promise((resolve) => setTimeout(resolve, 4000));
+      res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: requestBody,
+      });
     }
-    throw new Error(`Gemini TTS HTTP ${res.status}`);
+
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      if (res.status === 401 || res.status === 403) {
+        throw new Error('Invalid Gemini API key. Update your key in API Settings.');
+      }
+      if (isModelRetiredOrUnsupportedError(res.status, errText)) {
+        console.warn(
+          `[AutoTube Voice] Gemini TTS model "${model}" retired/unsupported (${res.status}); trying next active TTS model.`
+        );
+        markGeminiTtsModelRetired(cred.apiKey, model);
+        errors.push(`${model}: retired (${res.status})`);
+        continue;
+      }
+      if (res.status === 429) {
+        errors.push(`${model}: HTTP 429`);
+        if (i + 1 < ttsModels.length) continue;
+        throw new Error(
+          'Gemini TTS rate limit reached (HTTP 429). Wait a moment or add ElevenLabs in API Settings for voice-over.'
+        );
+      }
+      errors.push(`${model}: HTTP ${res.status}`);
+      if (i + 1 < ttsModels.length) continue;
+      throw new Error(`Gemini TTS HTTP ${res.status}`);
+    }
+
+    const data = (await res.json()) as {
+      candidates?: Array<{
+        content?: {
+          parts?: Array<{
+            inlineData?: { mimeType?: string; data?: string };
+          }>;
+        };
+      }>;
+    };
+
+    const inline = data.candidates?.[0]?.content?.parts?.find((p) => p.inlineData?.data)?.inlineData;
+    if (!inline?.data) {
+      errors.push(`${model}: empty audio payload`);
+      continue;
+    }
+
+    const rawBytes = Buffer.from(inline.data, 'base64');
+    const mime = (inline.mimeType || 'audio/L16;rate=24000').toLowerCase();
+
+    if (mime.includes('l16') || mime.includes('pcm')) {
+      const rateMatch = mime.match(/rate=(\d+)/);
+      const sampleRate = rateMatch ? Number(rateMatch[1]) : 24000;
+      const wavBuffer = wrapPcm16AsWav(rawBytes, sampleRate, 1);
+      return { buffer: wavBuffer, ext: 'wav', mimeType: 'audio/wav' };
+    }
+    if (mime.includes('mp3') || mime.includes('mpeg')) {
+      return { buffer: rawBytes, ext: 'mp3', mimeType: 'audio/mpeg' };
+    }
+    return { buffer: rawBytes, ext: 'wav', mimeType: 'audio/wav' };
   }
 
-  const data = (await res.json()) as {
-    candidates?: Array<{
-      content?: {
-        parts?: Array<{
-          inlineData?: { mimeType?: string; data?: string };
-        }>;
-      };
-    }>;
-  };
-
-  const inline = data.candidates?.[0]?.content?.parts?.find((p) => p.inlineData?.data)?.inlineData;
-  if (!inline?.data) {
-    throw new Error('Gemini TTS response did not include audio payload.');
+  if (sawRateLimit) {
+    throw new Error(
+      'Gemini TTS rate limit reached (HTTP 429). Wait a moment or add ElevenLabs in API Settings for voice-over.'
+    );
   }
-
-  const rawBytes = Buffer.from(inline.data, 'base64');
-  const mime = (inline.mimeType || 'audio/L16;rate=24000').toLowerCase();
-
-  if (mime.includes('l16') || mime.includes('pcm')) {
-    const rateMatch = mime.match(/rate=(\d+)/);
-    const sampleRate = rateMatch ? Number(rateMatch[1]) : 24000;
-    const wavBuffer = wrapPcm16AsWav(rawBytes, sampleRate, 1);
-    return { buffer: wavBuffer, ext: 'wav', mimeType: 'audio/wav' };
-  }
-  if (mime.includes('mp3') || mime.includes('mpeg')) {
-    return { buffer: rawBytes, ext: 'mp3', mimeType: 'audio/mpeg' };
-  }
-  return { buffer: rawBytes, ext: 'wav', mimeType: 'audio/wav' };
+  throw new Error(`Gemini TTS failed across active models (${errors.join('; ')})`);
 }
 
 /**

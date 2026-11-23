@@ -6,6 +6,13 @@ import {
   GROQ_BASE_URL,
   resolveUserProviderKey,
 } from './credentialService.js';
+import {
+  isModelRetiredOrUnsupportedError,
+  markGeminiTextModelRetired,
+  markGroqModelRetired,
+  resolveActiveGeminiTextModels,
+  resolveActiveGroqModels,
+} from './modelResolver.js';
 
 export type LLMProviderName = 'gemini' | 'groq' | 'openai_compatible';
 
@@ -171,49 +178,84 @@ function cleanXmlText(text: string): string {
 
 class GeminiAIProvider implements AIProviderClient {
   readonly name = 'gemini';
-  private readonly model: string;
+  private readonly preferredModel?: string;
 
-  constructor(private readonly apiKey: string, model = 'gemini-2.5-flash') {
-    this.model = model;
+  constructor(private readonly apiKey: string, model?: string) {
+    const clean = (model || '').trim();
+    this.preferredModel = clean && clean.toLowerCase() !== 'auto' ? clean : undefined;
   }
 
   async generateJson<T>(systemPrompt: string, userPrompt: string): Promise<T> {
-    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
-      this.model
-    )}:generateContent?key=${encodeURIComponent(this.apiKey)}`;
+    const candidates = (
+      await resolveActiveGeminiTextModels(this.apiKey, this.preferredModel)
+    ).slice(0, 4);
+    const errors: string[] = [];
+    let sawRateLimit = false;
 
-    const res = await fetch(endpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: systemPrompt }] },
-        contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
-        generationConfig: {
-          temperature: 0.7,
-          responseMimeType: 'application/json',
-        },
-      }),
-    });
+    for (let i = 0; i < candidates.length; i++) {
+      const model = candidates[i];
+      const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+        model
+      )}:generateContent?key=${encodeURIComponent(this.apiKey)}`;
 
-    if (!res.ok) {
-      const errText = await res.text();
-      if (res.status === 429) {
-        throw new Error('Gemini API quota or rate limit exceeded (HTTP 429).');
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: systemPrompt }] },
+          contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
+          generationConfig: {
+            temperature: 0.7,
+            responseMimeType: 'application/json',
+          },
+        }),
+      });
+
+      if (res.ok) {
+        const payload = (await res.json()) as {
+          candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+        };
+        const rawText = payload.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (!rawText) {
+          errors.push(`${model}: empty response`);
+          continue;
+        }
+        return parseJsonLoose<T>(rawText);
       }
+
+      const errText = await res.text().catch(() => '');
       if (res.status === 401 || res.status === 403) {
         throw new Error('Invalid Gemini API key. Update your key in API Settings.');
       }
-      throw new Error(`Gemini request failed (${res.status}): ${sanitizeErrorMessage(errText)}`);
+
+      if (isModelRetiredOrUnsupportedError(res.status, errText)) {
+        console.warn(
+          `[AutoTube AI] Gemini model "${model}" retired/unsupported (${res.status}); auto-switching to next active model.`
+        );
+        markGeminiTextModelRetired(this.apiKey, model);
+        errors.push(`${model}: retired/unsupported (${res.status})`);
+        continue;
+      }
+
+      if (res.status === 429) {
+        sawRateLimit = true;
+        errors.push(`${model}: HTTP 429`);
+        // Try another active Gemini model (e.g. flash-lite) before falling over to Groq
+        if (i + 1 < candidates.length) {
+          continue;
+        }
+        throw new Error('Gemini API quota or rate limit exceeded (HTTP 429).');
+      }
+
+      throw new Error(
+        `Gemini request failed on ${model} (${res.status}): ${sanitizeErrorMessage(errText)}`
+      );
     }
 
-    const payload = (await res.json()) as {
-      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
-    };
-    const rawText = payload.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!rawText) {
-      throw new Error('Gemini returned an empty response.');
+    if (sawRateLimit) {
+      throw new Error('Gemini API quota or rate limit exceeded (HTTP 429).');
     }
-    return parseJsonLoose<T>(rawText);
+    throw new Error(`Gemini request failed across active models (${errors.join('; ')})`);
   }
 }
 
@@ -272,38 +314,70 @@ class OpenAICompatibleProvider implements AIProviderClient {
 
 class GroqAIProvider implements AIProviderClient {
   readonly name = 'groq';
-  private readonly models: string[];
+  private readonly preference: string;
 
-  constructor(private readonly apiKey: string, model = DEFAULT_GROQ_MODEL) {
-    const preferredModel = (model || DEFAULT_GROQ_MODEL).trim();
-    const candidates = [preferredModel, DEFAULT_GROQ_MODEL, 'llama-3.1-8b-instant'];
-    this.models = Array.from(new Set(candidates.filter(Boolean)));
+  constructor(private readonly apiKey: string, preference = DEFAULT_GROQ_MODEL) {
+    this.preference = (preference || DEFAULT_GROQ_MODEL).trim();
+  }
+
+  private async requestGroqChat(
+    model: string,
+    systemPrompt: string,
+    userPrompt: string,
+    useJsonObjectFormat: boolean
+  ): Promise<Response> {
+    const body: Record<string, unknown> = {
+      model,
+      temperature: 0.7,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+    };
+    if (useJsonObjectFormat) {
+      body.response_format = { type: 'json_object' };
+    }
+    return fetch(`${GROQ_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${this.apiKey}`,
+      },
+      body: JSON.stringify(body),
+    });
   }
 
   async generateJson<T>(systemPrompt: string, userPrompt: string): Promise<T> {
     const ensuredSystem = /json/i.test(systemPrompt)
       ? systemPrompt
       : `${systemPrompt}\nReturn strictly valid JSON.`;
+    const candidates = (await resolveActiveGroqModels(this.apiKey, this.preference)).slice(0, 5);
     const errors: string[] = [];
+    let sawRateLimit = false;
 
-    for (let i = 0; i < this.models.length; i++) {
-      const model = this.models[i];
-      const res = await fetch(`${GROQ_BASE_URL}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${this.apiKey}`,
-        },
-        body: JSON.stringify({
-          model,
-          temperature: 0.7,
-          response_format: { type: 'json_object' },
-          messages: [
-            { role: 'system', content: ensuredSystem },
-            { role: 'user', content: userPrompt },
-          ],
-        }),
-      });
+    for (let i = 0; i < candidates.length; i++) {
+      const model = candidates[i];
+      let res = await this.requestGroqChat(model, ensuredSystem, userPrompt, true);
+
+      // Some newly launched models occasionally reject strict response_format or fail json_validate_failed;
+      // retry once without response_format and parse JSON cleanly before moving to the next model.
+      if (res.status === 400) {
+        const firstErr = await res.text().catch(() => '');
+        if (isModelRetiredOrUnsupportedError(res.status, firstErr)) {
+          console.warn(
+            `[AutoTube AI] Groq model "${model}" retired/decommissioned; auto-switching to next active model.`
+          );
+          markGroqModelRetired(this.apiKey, model);
+          errors.push(`${model}: retired (${res.status})`);
+          continue;
+        }
+        if (/json_validate_failed|response_format/i.test(firstErr)) {
+          res = await this.requestGroqChat(model, ensuredSystem, userPrompt, false);
+        } else {
+          errors.push(`${model}: HTTP 400 (${sanitizeErrorMessage(firstErr)})`);
+          continue;
+        }
+      }
 
       if (res.ok) {
         const data = (await res.json()) as {
@@ -314,7 +388,12 @@ class GroqAIProvider implements AIProviderClient {
           errors.push(`${model}: empty completion`);
           continue;
         }
-        return parseJsonLoose<T>(rawText);
+        try {
+          return parseJsonLoose<T>(rawText);
+        } catch {
+          errors.push(`${model}: malformed JSON output`);
+          continue;
+        }
       }
 
       if (res.status === 401 || res.status === 403) {
@@ -322,24 +401,35 @@ class GroqAIProvider implements AIProviderClient {
       }
 
       const errText = await res.text().catch(() => '');
+      if (isModelRetiredOrUnsupportedError(res.status, errText)) {
+        console.warn(
+          `[AutoTube AI] Groq model "${model}" retired/unavailable (${res.status}); auto-switching to next active model.`
+        );
+        markGroqModelRetired(this.apiKey, model);
+        errors.push(`${model}: retired (${res.status})`);
+        continue;
+      }
+
       if (res.status === 429) {
+        sawRateLimit = true;
         errors.push(`${model}: HTTP 429`);
-        // Try fast fallback Groq model (e.g., llama-3.1-8b-instant) before giving up
-        if (i + 1 < this.models.length) {
+        if (i + 1 < candidates.length) {
           continue;
         }
         throw new Error('Groq API quota or rate limit exceeded (HTTP 429).');
       }
 
-      if (res.status === 404 && i + 1 < this.models.length) {
-        errors.push(`${model}: model unavailable (404)`);
+      errors.push(`${model}: HTTP ${res.status} (${sanitizeErrorMessage(errText)})`);
+      if (i + 1 < candidates.length) {
         continue;
       }
-
       throw new Error(`Groq request failed (${res.status}): ${sanitizeErrorMessage(errText)}`);
     }
 
-    throw new Error(`Groq request failed (${errors.join('; ')})`);
+    if (sawRateLimit) {
+      throw new Error('Groq API quota or rate limit exceeded (HTTP 429).');
+    }
+    throw new Error(`Groq request failed across active models (${errors.join('; ')})`);
   }
 }
 
@@ -350,6 +440,9 @@ export function isFailoverEligibleError(err: unknown): boolean {
     msg.includes('quota') ||
     msg.includes('rate limit') ||
     msg.includes('resource_exhausted') ||
+    msg.includes('retired') ||
+    msg.includes('decommission') ||
+    msg.includes('deprecated') ||
     msg.includes('temporarily unavailable') ||
     msg.includes('empty response') ||
     msg.includes('empty completion') ||
@@ -401,8 +494,18 @@ export function parseJsonLoose<T>(text: string): T {
     .trim()
     .replace(/^```json\s*/i, '')
     .replace(/^```\s*/i, '')
-    .replace(/\s*```$/i, '');
-  return JSON.parse(cleaned) as T;
+    .replace(/\s*```$/i, '')
+    .trim();
+  try {
+    return JSON.parse(cleaned) as T;
+  } catch {
+    const firstBrace = cleaned.indexOf('{');
+    const lastBrace = cleaned.lastIndexOf('}');
+    if (firstBrace >= 0 && lastBrace > firstBrace) {
+      return JSON.parse(cleaned.slice(firstBrace, lastBrace + 1)) as T;
+    }
+    throw new Error('Could not parse JSON from model response.');
+  }
 }
 
 async function resolvePreferredLLMFromProfile(userId: string): Promise<LLMProviderName | null> {
@@ -455,7 +558,7 @@ export async function createAIProviderForUser(
       resolvedClients.push(
         new GeminiAIProvider(
           cred.apiKey,
-          String(cred.providerConfig.model || 'gemini-2.5-flash')
+          typeof cred.providerConfig.model === 'string' ? cred.providerConfig.model : undefined
         )
       );
     }

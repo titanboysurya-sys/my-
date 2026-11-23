@@ -16,6 +16,12 @@ import {
   targetWordRangeForDuration,
   type AIProviderClient,
 } from '../src/services/aiProvider.js';
+import {
+  isModelRetiredOrUnsupportedError,
+  rankGeminiTextModels,
+  rankGeminiTtsModels,
+  rankGroqChatModels,
+} from '../src/services/modelResolver.js';
 import { scoreMediaCandidate, type MediaCandidate } from '../src/services/mediaSearchService.js';
 import { wrapPcm16AsWav } from '../src/services/voiceService.js';
 import {
@@ -302,5 +308,60 @@ test('Groq API key redaction, permanent error detection, and 429 failover to Gro
   assert.equal(result.ok, true);
   assert.equal(result.provider, 'groq');
 });
+
+test('Live model resolver skips retired/non-chat models and automatically adopts newest active Groq & Gemini models', () => {
+  // Simulate Groq /models after llama-3.3-70b-versatile is retired and newer models are live
+  const groqLive = [
+    { id: 'whisper-large-v3', active: true },
+    { id: 'llama-guard-4-12b', active: true },
+    { id: 'playai-tts', active: true },
+    { id: 'groq/compound', active: true },
+    { id: 'llama-3.3-70b-versatile', active: false },
+    { id: 'openai/gpt-oss-120b', active: true },
+    { id: 'openai/gpt-oss-20b', active: true },
+    { id: 'llama-3.1-8b-instant', active: true },
+  ];
+
+  // Auto mode skips inactive/audio/guard models and picks strongest active production model
+  const groqAuto = rankGroqChatModels(groqLive, 'auto');
+  assert.equal(groqAuto[0], 'openai/gpt-oss-120b');
+  assert.ok(!groqAuto.includes('whisper-large-v3'));
+  assert.ok(!groqAuto.includes('llama-3.3-70b-versatile'));
+
+  // Fast mode prioritizes ultra-high-limit fast models
+  const groqFast = rankGroqChatModels(groqLive, 'fast');
+  assert.ok(groqFast[0] === 'llama-3.1-8b-instant' || groqFast[0] === 'openai/gpt-oss-20b');
+
+  // Retired pinned model is safely ignored and replaced with active flagship
+  const groqPinnedRetired = rankGroqChatModels(groqLive, 'llama-3.3-70b-versatile');
+  assert.equal(groqPinnedRetired[0], 'openai/gpt-oss-120b');
+
+  // Simulate Gemini /v1beta/models with next-gen 3.5/4.0 models alongside 2.5
+  const geminiLive = [
+    { name: 'models/text-embedding-004', supportedGenerationMethods: ['embedContent'] },
+    { name: 'models/gemini-2.5-flash', supportedGenerationMethods: ['generateContent'] },
+    { name: 'models/gemini-2.5-flash-lite', supportedGenerationMethods: ['generateContent'] },
+    { name: 'models/gemini-3.5-flash', supportedGenerationMethods: ['generateContent'] },
+    { name: 'models/gemini-2.5-flash-preview-tts', supportedGenerationMethods: ['generateContent'] },
+    { name: 'models/gemini-3.0-flash-tts', supportedGenerationMethods: ['generateContent'] },
+  ];
+
+  const geminiText = rankGeminiTextModels(geminiLive);
+  assert.equal(geminiText[0], 'gemini-3.5-flash');
+  assert.ok(!geminiText.includes('gemini-2.5-flash-preview-tts'));
+  assert.ok(!geminiText.includes('text-embedding-004'));
+
+  const geminiTts = rankGeminiTtsModels(geminiLive);
+  assert.equal(geminiTts[0], 'gemini-3.0-flash-tts');
+  assert.equal(geminiTts[1], 'gemini-2.5-flash-preview-tts');
+
+  assert.equal(
+    isModelRetiredOrUnsupportedError(400, 'The model llama-3.3-70b-versatile has been decommissioned'),
+    true
+  );
+  assert.equal(isModelRetiredOrUnsupportedError(404, 'Model not found'), true);
+  assert.equal(isModelRetiredOrUnsupportedError(429, 'Rate limit exceeded'), false);
+});
+
 
 

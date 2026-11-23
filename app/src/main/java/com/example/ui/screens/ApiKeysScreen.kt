@@ -69,8 +69,8 @@ private data class ProviderDisplaySpec(
 )
 
 private val GROQ_MODEL_OPTIONS = listOf(
-    "llama-3.3-70b-versatile" to "Llama 3.3 70B (Best Quality)",
-    "llama-3.1-8b-instant" to "Llama 3.1 8B (Ultra High Limit)"
+    "auto" to "Auto (Best Active Model)",
+    "fast" to "Auto Fast (Highest Limit)"
 )
 
 private val BYOK_PROVIDER_SPECS = listOf(
@@ -209,7 +209,7 @@ fun ApiKeysScreen(
                 ) {
                     Text("Preferred Provider Routing", style = MaterialTheme.typography.titleMedium)
                     Text(
-                        text = "Tip: Connect both Groq & Gemini — if one hits a 429 rate limit, the cloud worker automatically fails over to the other.",
+                        text = "Auto-Healing Enabled: Both Groq & Gemini automatically discover live active models, skip retired models, and fail over on HTTP 429.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -378,7 +378,7 @@ private fun ProviderApiKeyCard(
             }
 
             if (spec.id == "groq") {
-                Text("Groq Model", style = MaterialTheme.typography.labelMedium)
+                Text("Groq Model Strategy (Live Active Auto-Discovery)", style = MaterialTheme.typography.labelMedium)
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     GROQ_MODEL_OPTIONS.forEach { (modelId, label) ->
                         FilterChip(

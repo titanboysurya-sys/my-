@@ -28,6 +28,7 @@ import com.example.core.network.UpdateScheduleRequest
 import com.example.core.network.UpdateScriptRequest
 import com.example.core.network.ValidateCredentialResponse
 import com.example.core.network.VideoJobDto
+import com.example.core.network.SetDefaultYouTubeRequest
 import com.example.core.network.YouTubeDisconnectRequest
 import com.example.core.security.AuthSession
 import com.example.core.security.SecureSessionStore
@@ -493,10 +494,32 @@ class StudioRepository(
         )
     }
 
+    suspend fun setDefaultYouTube(accountId: String): Result<Unit> = safeApiCall {
+        val uid = requireUserId()
+        val resp = client.backendApi().setDefaultYouTube(SetDefaultYouTubeRequest(accountId))
+        database.youTubeChannelDao().clearForUser(uid)
+        database.youTubeChannelDao().upsertAll(
+            resp.accounts.map { ch ->
+                CachedYouTubeChannelEntity(
+                    id = ch.id,
+                    userId = uid,
+                    channelId = ch.channelId,
+                    channelName = ch.channelName,
+                    channelHandle = ch.channelHandle,
+                    thumbnailUrl = ch.channelThumbnailUrl,
+                    subscriberCount = ch.subscriberCount,
+                    tokenStatus = ch.tokenStatus,
+                    isDefault = ch.isDefault,
+                    connectedAt = ch.connectedAt
+                )
+            }
+        )
+    }
+
     suspend fun disconnectYouTube(accountId: String? = null): Result<Unit> = safeApiCall {
         val uid = requireUserId()
         client.backendApi().disconnectYouTube(YouTubeDisconnectRequest(accountId))
-        database.youTubeChannelDao().clearForUser(uid)
+        refreshYouTubeAccounts()
     }
 
     suspend fun getAutomationSettings(): Result<ScheduleDto?> = safeApiCall {

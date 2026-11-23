@@ -34,6 +34,9 @@ interface AutoTubeBackendApi {
     @GET("api/youtube/accounts")
     suspend fun getYouTubeAccounts(): YouTubeAccountsResponse
 
+    @POST("api/youtube/default")
+    suspend fun setDefaultYouTube(@Body request: SetDefaultYouTubeRequest): YouTubeAccountsResponse
+
     @POST("api/youtube/disconnect")
     suspend fun disconnectYouTube(@Body request: YouTubeDisconnectRequest): SimpleStatusResponse
 

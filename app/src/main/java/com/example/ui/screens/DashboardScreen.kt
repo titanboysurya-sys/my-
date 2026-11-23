@@ -60,6 +60,7 @@ import com.example.core.database.CachedYouTubeChannelEntity
 import com.example.ui.components.StatusPill
 import com.example.ui.components.StudioSectionHeader
 import com.example.ui.components.TelemetryStatCard
+import com.example.ui.components.formatIsoToLocalDisplay
 import com.example.ui.theme.PipelineCyan
 import com.example.ui.theme.SignalCrimson
 import com.example.ui.theme.StudioAmber
@@ -151,8 +152,9 @@ fun DashboardScreen(
                                 color = Color.White
                             )
                             Text(
-                                text = uiState.nextScheduledRun?.let { "Next cloud run: ${it.take(16).replace('T', ' ')} UTC" }
-                                    ?: "Cloud workers idle — configure schedule or start a video now",
+                                text = formatIsoToLocalDisplay(uiState.nextScheduledRun, uiState.schedule?.timezone)?.let {
+                                    "Next cloud run: $it"
+                                } ?: "Cloud workers idle — configure schedule or start a video now",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = Color(0xFFCBD5E1),
                                 maxLines = 1,

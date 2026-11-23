@@ -63,6 +63,48 @@ export function resolveOutputDimensions(
 }
 
 /**
+ * Calibrates each scene's duration proportionally to its actual spoken text weight
+ * so visuals and subtitles stay tightly synchronized with the TTS voiceover from start to finish.
+ */
+export function calibrateClipDurations(
+  clips: TimelineSceneClip[],
+  totalNarrationDurationSec: number
+): TimelineSceneClip[] {
+  const targetTotal = Math.max(totalNarrationDurationSec, 5);
+  if (clips.length === 0) return [];
+
+  const weights = clips.map((clip) => {
+    const clean = (clip.subtitleText || '').trim();
+    if (!clean) return Math.max(1.5, clip.durationSec);
+    const words = clean.split(/\s+/).filter(Boolean).length;
+    const chars = clean.replace(/\s+/g, '').length;
+    // Blend word & character count so both English and Devanagari/CJK pacing stay accurate
+    return Math.max(1.5, words * 0.65 + (chars / 5) * 0.35);
+  });
+
+  const sumWeight = weights.reduce((a, b) => a + b, 0) || 1;
+  const minSceneSec = Math.min(1.8, targetTotal / clips.length);
+
+  const rawDurations = weights.map((w) => Math.max(minSceneSec, (w / sumWeight) * targetTotal));
+  const rawSum = rawDurations.reduce((a, b) => a + b, 0) || targetTotal;
+
+  return clips.map((clip, idx) => ({
+    ...clip,
+    durationSec: (rawDurations[idx] / rawSum) * targetTotal,
+  }));
+}
+
+function splitCaptionChunks(text: string, maxWordsPerChunk: number): string[] {
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return [];
+  const chunks: string[] = [];
+  for (let i = 0; i < words.length; i += maxWordsPerChunk) {
+    chunks.push(words.slice(i, i + maxWordsPerChunk).join(' '));
+  }
+  return chunks;
+}
+
+/**
  * Generates synchronized phrase-level SRT subtitles from scene durations & narration text.
  */
 export function buildSynchronizedSrt(clips: TimelineSceneClip[]): string {
@@ -71,23 +113,17 @@ export function buildSynchronizedSrt(clips: TimelineSceneClip[]): string {
   let index = 1;
 
   for (const clip of clips) {
-    const words = clip.subtitleText.trim().split(/\s+/).filter(Boolean);
-    if (words.length === 0) {
+    const chunks = splitCaptionChunks(clip.subtitleText, 5);
+    if (chunks.length === 0) {
       cursorSec += clip.durationSec;
       continue;
     }
 
-    // Split into crisp 4-6 word caption chunks for high readability on Shorts & landscape
-    const chunkSize = 5;
-    const chunks: string[] = [];
-    for (let i = 0; i < words.length; i += chunkSize) {
-      chunks.push(words.slice(i, i + chunkSize).join(' '));
-    }
-
-    const sliceSec = clip.durationSec / chunks.length;
+    const totalChars = chunks.reduce((acc, c) => acc + Math.max(1, c.length), 0);
     for (const chunk of chunks) {
+      const sliceSec = (Math.max(1, chunk.length) / totalChars) * clip.durationSec;
       const start = cursorSec;
-      const end = cursorSec + Math.max(0.4, sliceSec - 0.04);
+      const end = cursorSec + Math.max(0.35, sliceSec - 0.03);
       entries.push(`${index}\n${formatSrtTime(start)} --> ${formatSrtTime(end)}\n${chunk}\n`);
       cursorSec += sliceSec;
       index++;
@@ -95,6 +131,118 @@ export function buildSynchronizedSrt(clips: TimelineSceneClip[]): string {
   }
 
   return entries.join('\n');
+}
+
+/**
+ * Generates an Advanced SubStation Alpha (.ass) subtitle file with explicit PlayResX/PlayResY
+ * matching the output video dimensions. This eliminates libass's default 288px scaling bug that
+ * caused subtitles to float near the top of 9:16 Shorts.
+ */
+export function buildSynchronizedAss(
+  clips: TimelineSceneClip[],
+  width: number,
+  height: number,
+  style: SubtitleStyleConfig
+): string {
+  const isVertical = height > width;
+  const isSquare = Math.abs(height - width) < 40;
+
+  // Responsive readable font size scaled directly to actual video resolution
+  const baseFontSize = isVertical
+    ? Math.round(width * 0.058)
+    : isSquare
+      ? Math.round(width * 0.052)
+      : Math.round(height * 0.056);
+  const scaleFactor = Math.max(0.75, Math.min(1.25, (style.fontSize || 44) / 44));
+  const fontSize = Math.max(24, Math.min(82, Math.round(baseFontSize * scaleFactor)));
+
+  const alignment =
+    style.position === 'center' ? 5 : style.position === 'top_safe' ? 8 : 2;
+
+  // Bottom-safe lower-third positioning: 14% from bottom on 9:16 (clears YouTube Shorts UI), 8% on 16:9
+  const marginV =
+    style.position === 'center'
+      ? 0
+      : style.position === 'top_safe'
+        ? Math.round(height * 0.12)
+        : isVertical
+          ? Math.round(height * 0.14)
+          : isSquare
+            ? Math.round(height * 0.1)
+            : Math.round(height * 0.08);
+
+  const marginH = Math.round(width * 0.08);
+  const outlinePx = Math.max(2, Math.round(fontSize * 0.085));
+  const shadowPx = Math.max(1, Math.round(fontSize * 0.04));
+
+  const primaryAss = hexToAssColor(style.primaryColor || '#FFFFFF', '00');
+  const outlineAss = hexToAssColor(style.outlineColor || '#000000', '00');
+  const backAss = '&H78000000';
+
+  const header = [
+    '[Script Info]',
+    'ScriptType: v4.00+',
+    `PlayResX: ${width}`,
+    `PlayResY: ${height}`,
+    'ScaledBorderAndShadow: yes',
+    'WrapStyle: 2',
+    '',
+    '[V4+ Styles]',
+    'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
+    `Style: Default,Noto Sans,${fontSize},${primaryAss},&H0000FFFF,${outlineAss},${backAss},-1,0,0,0,100,100,0,0,1,${outlinePx},${shadowPx},${alignment},${marginH},${marginH},${marginV},1`,
+    '',
+    '[Events]',
+    'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text',
+  ];
+
+  const maxWords = isVertical ? 4 : 6;
+  const dialogueLines: string[] = [];
+  let cursorSec = 0;
+
+  for (const clip of clips) {
+    const chunks = splitCaptionChunks(clip.subtitleText, maxWords);
+    if (chunks.length === 0) {
+      cursorSec += clip.durationSec;
+      continue;
+    }
+
+    const totalChars = chunks.reduce((acc, c) => acc + Math.max(1, c.length), 0);
+    for (const chunk of chunks) {
+      const sliceSec = (Math.max(1, chunk.length) / totalChars) * clip.durationSec;
+      const start = cursorSec;
+      const end = cursorSec + Math.max(0.32, sliceSec - 0.03);
+      const safeText = chunk
+        .replace(/\\/g, '')
+        .replace(/[{}]/g, '')
+        .replace(/\r?\n/g, '\\N');
+      dialogueLines.push(
+        `Dialogue: 0,${formatAssTime(start)},${formatAssTime(end)},Default,,0,0,0,,${safeText}`
+      );
+      cursorSec += sliceSec;
+    }
+  }
+
+  return [...header, ...dialogueLines, ''].join('\n');
+}
+
+function hexToAssColor(hex: string, alphaHex = '00'): string {
+  const clean = hex.replace('#', '').trim();
+  if (/^[0-9a-fA-F]{6}$/.test(clean)) {
+    const r = clean.slice(0, 2).toUpperCase();
+    const g = clean.slice(2, 4).toUpperCase();
+    const b = clean.slice(4, 6).toUpperCase();
+    return `&H${alphaHex}${b}${g}${r}`;
+  }
+  return `&H${alphaHex}FFFFFF`;
+}
+
+function formatAssTime(totalSec: number): string {
+  const clamped = Math.max(0, totalSec);
+  const hours = Math.floor(clamped / 3600);
+  const minutes = Math.floor((clamped % 3600) / 60);
+  const seconds = Math.floor(clamped % 60);
+  const cs = Math.min(99, Math.round((clamped - Math.floor(clamped)) * 100));
+  return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(cs).padStart(2, '0')}`;
 }
 
 function formatSrtTime(totalSec: number): string {
@@ -117,10 +265,11 @@ function isLowMemoryRenderEnv(): boolean {
 
 /**
  * Renders the complete video using FFmpeg via execFile (never shell interpolation):
- * 1. Normalizes each clip (or applies Ken Burns zoompan to fallback images)
- * 2. Concatenates normalized clips
- * 3. Mixes narration + optional ducked background music + burned-in SRT subtitles
- * 4. Runs ffprobe quality verification on the output MP4
+ * 1. Calibrates scene durations proportionally by spoken word weight to lock voiceover sync
+ * 2. Normalizes each clip (smooth continuous Ken Burns for images, subtle transition fades for video)
+ * 3. Concatenates normalized clips
+ * 4. Mixes narration + optional ducked background music + resolution-accurate ASS subtitles
+ * 5. Runs ffprobe quality verification on the output MP4
  */
 export async function renderVideoWithFfmpeg(
   req: RenderVideoRequest
@@ -137,37 +286,47 @@ export async function renderVideoWithFfmpeg(
     ? ['-x264-params', 'rc-lookahead=8:ref=1:bframes=0:sync-lookahead=0:threads=1', '-bufsize', '2M']
     : ['-x264-params', 'rc-lookahead=20:threads=2'];
 
-  // Scale scene durations proportionally so visuals match actual narration audio length
-  const rawTotal = req.clips.reduce((acc, c) => acc + Math.max(1.5, c.durationSec), 0) || 1;
   const targetTotal = Math.max(req.totalNarrationDurationSec, 5);
-  const scaledClips: TimelineSceneClip[] = req.clips.map((clip) => ({
-    ...clip,
-    durationSec: Math.max(1.5, (clip.durationSec / rawTotal) * targetTotal),
-  }));
+  const scaledClips = calibrateClipDurations(req.clips, targetTotal);
 
-  // 1. Write synchronized SRT subtitle file
+  // 1. Write synchronized SRT (for export) and resolution-accurate ASS (for burn-in)
   const srtPath = resolveConfinedPath(req.workDir, 'subtitles.srt');
+  const assPath = resolveConfinedPath(req.workDir, 'subtitles.ass');
   const srtContent = buildSynchronizedSrt(scaledClips);
-  await fs.writeFile(srtPath, srtContent, 'utf8');
+  const assContent = buildSynchronizedAss(scaledClips, width, height, req.subtitleStyle);
+  await Promise.all([
+    fs.writeFile(srtPath, srtContent, 'utf8'),
+    fs.writeFile(assPath, assContent, 'utf8'),
+  ]);
 
-  // 2. Normalize every scene clip to consistent resolution, fps, yuv420p, and exact duration
+  // 2. Normalize every scene clip to consistent resolution, fps, yuv420p, smooth motion, and exact duration
   const normalizedPaths: string[] = [];
-  for (const clip of scaledClips) {
+  for (let idx = 0; idx < scaledClips.length; idx++) {
+    const clip = scaledClips[idx];
     const outSegment = resolveConfinedPath(
       req.workDir,
       `seg_${String(clip.sceneNumber).padStart(3, '0')}.mp4`
     );
+    const fadeDur = Math.min(0.2, clip.durationSec * 0.12);
+    const fadeOutStart = Math.max(0, clip.durationSec - fadeDur);
 
     if (clip.mediaType === 'image') {
       const frames = Math.max(fps, Math.round(clip.durationSec * fps));
       // Keep zoompan source frame close to output size (never 2x/4K) to stay well under 512 MB RAM
-      const zpW = Math.ceil((width * 1.12) / 2) * 2;
-      const zpH = Math.ceil((height * 1.12) / 2) * 2;
+      const zpW = Math.ceil((width * 1.16) / 2) * 2;
+      const zpH = Math.ceil((height * 1.16) / 2) * 2;
+      // Alternate gentle zoom-in and zoom-out across the full clip duration so images never freeze
+      const zoomExpr =
+        idx % 2 === 0
+          ? `1.0+(0.14*on/${frames})`
+          : `1.14-(0.14*on/${frames})`;
       const vf = [
         `scale=${zpW}:${zpH}:force_original_aspect_ratio=increase`,
         `crop=${zpW}:${zpH}`,
-        `zoompan=z='min(zoom+0.001,1.12)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${width}x${height}:fps=${fps}`,
+        `zoompan=z='${zoomExpr}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${width}x${height}:fps=${fps}`,
         'eq=contrast=1.04:saturation=1.08',
+        `fade=t=in:st=0:d=${fadeDur.toFixed(2)}`,
+        `fade=t=out:st=${fadeOutStart.toFixed(2)}:d=${fadeDur.toFixed(2)}`,
         'format=yuv420p',
       ].join(',');
 
@@ -200,6 +359,8 @@ export async function renderVideoWithFfmpeg(
         `crop=${width}:${height}`,
         `fps=${fps}`,
         'eq=contrast=1.03:saturation=1.06',
+        `fade=t=in:st=0:d=${fadeDur.toFixed(2)}`,
+        `fade=t=out:st=${fadeOutStart.toFixed(2)}:d=${fadeDur.toFixed(2)}`,
         'format=yuv420p',
       ].join(',');
 
@@ -253,7 +414,7 @@ export async function renderVideoWithFfmpeg(
   // Free disk/page-cache pressure from intermediate segment files right away
   await Promise.all(normalizedPaths.map((p) => fs.rm(p, { force: true }).catch(() => undefined)));
 
-  // 4. Final pass: burn subtitles (if enabled) + mix narration & optional ducked background music
+  // 4. Final pass: burn resolution-accurate ASS subtitles + mix narration & optional ducked music
   const finalVideoPath = resolveConfinedPath(req.workDir, 'final_output.mp4');
   const ffmpegArgs: string[] = [
     '-y',
@@ -275,19 +436,8 @@ export async function renderVideoWithFfmpeg(
     req.subtitleStyle.enabled && req.subtitleStyle.burnIn && srtContent.trim().length > 0;
 
   if (burnSubtitles) {
-    const marginV = req.format === '9:16' ? (lowMem ? 150 : 220) : 56;
-    const alignment =
-      req.subtitleStyle.position === 'center'
-        ? 5
-        : req.subtitleStyle.position === 'top_safe'
-          ? 8
-          : 2;
-    const escapedSrt = srtPath.replace(/\\/g, '/').replace(/:/g, '\\:');
-    const forceStyle = `FontName=DejaVu Sans,FontSize=${Math.max(
-      14,
-      Math.min(32, Math.round(req.subtitleStyle.fontSize * (lowMem ? 0.45 : 0.55)))
-    )},PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H66000000,BorderStyle=3,Outline=2,Shadow=1,Alignment=${alignment},MarginV=${marginV}`;
-    filterParts.push(`[0:v]subtitles='${escapedSrt}':force_style='${forceStyle}'[vout]`);
+    const escapedAss = assPath.replace(/\\/g, '/').replace(/:/g, '\\:').replace(/'/g, "\\'");
+    filterParts.push(`[0:v]ass='${escapedAss}'[vout]`);
     videoMap = '[vout]';
   }
 
@@ -376,6 +526,30 @@ export async function renderVideoWithFfmpeg(
   };
 }
 
+async function resolveThumbnailFontPath(text: string): Promise<string> {
+  const hasDevanagari = /[\u0900-\u097F]/.test(text);
+  const candidates = hasDevanagari
+    ? [
+        '/usr/share/fonts/truetype/noto/NotoSansDevanagari-Bold.ttf',
+        '/usr/share/fonts/truetype/lohit-devanagari/Lohit-Devanagari.ttf',
+        '/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf',
+        '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+      ]
+    : [
+        '/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf',
+        '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+      ];
+  for (const candidate of candidates) {
+    try {
+      await fs.access(candidate);
+      return candidate;
+    } catch {
+      // try next installed font
+    }
+  }
+  return '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf';
+}
+
 /**
  * Generates a YouTube-compliant 16:9 (1280x720) high-contrast thumbnail from the rendered video
  * with a dark cinematic bottom gradient and bold readable headline overlay.
@@ -386,19 +560,20 @@ export async function generateThumbnailFromVideo(params: {
   headlineText: string;
 }): Promise<string> {
   const thumbPath = resolveConfinedPath(params.workDir, 'thumbnail_1280x720.jpg');
+  const hasNonLatin = /[^\x00-\x7F]/.test(params.headlineText);
   const safeHeadline = params.headlineText
     .replace(/[':\\]/g, '')
     .replace(/\s+/g, ' ')
-    .trim()
-    .toUpperCase()
-    .slice(0, 36);
+    .trim();
+  const formattedHeadline = (hasNonLatin ? safeHeadline : safeHeadline.toUpperCase()).slice(0, 36);
+  const fontFile = await resolveThumbnailFontPath(formattedHeadline);
 
   const vf = [
     'scale=1280:720:force_original_aspect_ratio=increase',
     'crop=1280:720',
     'eq=contrast=1.15:saturation=1.22:brightness=-0.04',
     'drawbox=x=0:y=460:w=1280:h=260:color=black@0.62:t=fill',
-    `drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:text='${safeHeadline}':fontcolor=white:fontsize=64:borderw=4:bordercolor=black:x=(w-text_w)/2:y=555`,
+    `drawtext=fontfile=${fontFile}:text='${formattedHeadline}':fontcolor=white:fontsize=62:borderw=4:bordercolor=black:x=(w-text_w)/2:y=555`,
   ].join(',');
 
   await runFfmpeg([

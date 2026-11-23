@@ -607,6 +607,17 @@ class StudioViewModel(
         }
     }
 
+    fun setDefaultYouTube(accountId: String) {
+        viewModelScope.launch {
+            repository.setDefaultYouTube(accountId)
+                .onSuccess {
+                    showInfo("Default YouTube channel updated")
+                    refreshDashboard()
+                }
+                .onFailure { showError(it.message ?: "Could not update default channel") }
+        }
+    }
+
     fun disconnectYouTube(accountId: String? = null) {
         viewModelScope.launch {
             repository.disconnectYouTube(accountId)

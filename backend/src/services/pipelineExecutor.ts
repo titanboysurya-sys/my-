@@ -691,6 +691,7 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
       auto_upload?: boolean;
       privacy_status?: 'private' | 'unlisted' | 'public';
       scheduled_publish_time?: string | null;
+      youtube_account_id?: string | null;
     };
 
     let finalJobStatus: 'published' | 'scheduled' = 'published';
@@ -772,7 +773,7 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
         jobId: job.id,
         eventType: 'upload_started',
         title: 'YouTube upload started',
-        body: `Uploading "${seo.title}" to your connected YouTube channel.`,
+        body: `Uploading "${seo.title}" to your selected YouTube channel.`,
       });
 
       const fullDescription = [
@@ -785,6 +786,7 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
       const uploaded = await uploadVideoToYouTubeResumable({
         userId: job.user_id,
         projectId: project.id,
+        youtubeAccountId: uploadCfg.youtube_account_id || null,
         localVideoPath: rendered.finalVideoPath,
         localThumbnailPath: localThumbPath,
         title: seo.title,
@@ -804,10 +806,11 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
 
       markStageDone('uploading');
       finalJobStatus = uploaded.status;
+      const channelLabel = uploaded.channelName ? ` (${uploaded.channelName})` : '';
       finalMessage =
         uploaded.status === 'scheduled'
-          ? `Scheduled on YouTube: ${uploaded.videoUrl}`
-          : `Published on YouTube: ${uploaded.videoUrl}`;
+          ? `Scheduled on YouTube${channelLabel}: ${uploaded.videoUrl}`
+          : `Published on YouTube${channelLabel}: ${uploaded.videoUrl}`;
 
       // Zero-bloat mode: delete heavy MP4, clips, audio, and SRT from cloud storage once on YouTube
       if (autoCleanupStorage) {

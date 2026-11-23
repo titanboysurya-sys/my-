@@ -306,6 +306,85 @@ export async function createAIProviderForUser(
   );
 }
 
+export interface LanguageMeta {
+  code: string;
+  name: string;
+  ttsName: string;
+  scriptInstruction: string;
+}
+
+const LANGUAGE_MAP: Record<string, LanguageMeta> = {
+  en: {
+    code: 'en',
+    name: 'English',
+    ttsName: 'English',
+    scriptInstruction: 'Write strictly in natural, fluent English.',
+  },
+  hi: {
+    code: 'hi',
+    name: 'Hindi (Devanagari)',
+    ttsName: 'Hindi',
+    scriptInstruction:
+      'Write strictly in natural spoken Hindi using Devanagari script (हिंदी). Do NOT write sentences in English; only keep unavoidable brand/tech names.',
+  },
+  hinglish: {
+    code: 'hinglish',
+    name: 'Hinglish (Hindi in Roman script)',
+    ttsName: 'Hindi',
+    scriptInstruction:
+      'Write strictly in natural conversational Hindi written in Roman/Latin script (Hinglish, e.g. "Aaj hum janenge ki..."). Do NOT write pure English and do NOT use Devanagari characters.',
+  },
+  es: {
+    code: 'es',
+    name: 'Spanish',
+    ttsName: 'Spanish',
+    scriptInstruction: 'Write strictly in natural, engaging Spanish (Español). Do NOT write in English.',
+  },
+  fr: {
+    code: 'fr',
+    name: 'French',
+    ttsName: 'French',
+    scriptInstruction: 'Write strictly in natural, engaging French (Français). Do NOT write in English.',
+  },
+  de: {
+    code: 'de',
+    name: 'German',
+    ttsName: 'German',
+    scriptInstruction: 'Write strictly in natural, engaging German (Deutsch). Do NOT write in English.',
+  },
+  ja: {
+    code: 'ja',
+    name: 'Japanese',
+    ttsName: 'Japanese',
+    scriptInstruction: 'Write strictly in natural Japanese (日本語). Do NOT write in English.',
+  },
+  pt: {
+    code: 'pt',
+    name: 'Portuguese',
+    ttsName: 'Portuguese',
+    scriptInstruction: 'Write strictly in natural Portuguese (Português). Do NOT write in English.',
+  },
+};
+
+export function resolveLanguageMeta(rawCode: string): LanguageMeta {
+  const normalized = (rawCode || 'en').trim().toLowerCase();
+  if (LANGUAGE_MAP[normalized]) return LANGUAGE_MAP[normalized];
+  if (normalized.startsWith('hi') && normalized.includes('inglish')) return LANGUAGE_MAP.hinglish;
+  if (normalized.startsWith('hi') || normalized.includes('hindi')) return LANGUAGE_MAP.hi;
+  if (normalized.startsWith('es') || normalized.includes('span')) return LANGUAGE_MAP.es;
+  if (normalized.startsWith('fr') || normalized.includes('fren')) return LANGUAGE_MAP.fr;
+  if (normalized.startsWith('de') || normalized.includes('germ')) return LANGUAGE_MAP.de;
+  if (normalized.startsWith('ja') || normalized.includes('japan')) return LANGUAGE_MAP.ja;
+  if (normalized.startsWith('pt') || normalized.includes('portug')) return LANGUAGE_MAP.pt;
+  if (normalized.startsWith('en') || normalized.includes('engl')) return LANGUAGE_MAP.en;
+  return {
+    code: normalized,
+    name: rawCode.trim() || 'English',
+    ttsName: rawCode.trim() || 'English',
+    scriptInstruction: `Write strictly in natural ${rawCode.trim() || 'English'}. Do NOT switch to another language.`,
+  };
+}
+
 /**
  * Calculates target spoken word count range based on video duration (~2.3 words/sec).
  */
@@ -319,17 +398,22 @@ export async function researchTopicsWithAI(
   ai: AIProviderClient,
   input: TopicResearchInput
 ): Promise<{ suggestions: TopicSuggestion[]; verifiedReferences: ResearchReference[] }> {
+  const lang = resolveLanguageMeta(input.language);
   const rssItems =
     input.topicType === 'news' || input.topicType === 'trending' || input.niche === 'AI News'
       ? await fetchVerifiedRssItems(input.niche, 8)
       : [];
 
-  const systemPrompt = `You are a factual YouTube content strategist. Never invent breaking news, statistics, or dates. When source headlines are supplied, base news topics strictly on those verified sources and include their exact URLs and publication dates. Return strictly valid JSON.`;
+  const systemPrompt = `You are a factual YouTube content strategist.
+CRITICAL LANGUAGE RULE: ${lang.scriptInstruction} All suggested topic titles, angles, and whyNow explanations MUST be written in ${lang.name} (even if RSS reference headlines are in English).
+Never invent breaking news, statistics, or dates. When source headlines are supplied, base news topics strictly on those verified sources and include their exact URLs and publication dates. Return strictly valid JSON.`;
 
   const userPrompt = JSON.stringify({
     task: 'Suggest high-retention YouTube video topics',
     niche: input.niche,
-    language: input.language,
+    targetLanguageCode: lang.code,
+    targetLanguageName: lang.name,
+    languageRequirement: lang.scriptInstruction,
     audienceCountry: input.audienceCountry,
     contentStyle: input.contentStyle,
     durationSeconds: input.durationSeconds,
@@ -341,9 +425,9 @@ export async function researchTopicsWithAI(
     requiredJsonSchema: {
       suggestions: [
         {
-          topic: 'string',
-          angle: 'string',
-          whyNow: 'string',
+          topic: `string (MUST be in ${lang.name})`,
+          angle: `string (MUST be in ${lang.name})`,
+          whyNow: `string (MUST be in ${lang.name})`,
           references: [{ title: 'string', source: 'string', url: 'string', publishedAt: 'string' }],
         },
       ],
@@ -370,25 +454,30 @@ export async function generateScriptWithAI(
   }
 ): Promise<GeneratedScript> {
   const words = targetWordRangeForDuration(params.durationSeconds);
+  const lang = resolveLanguageMeta(params.language);
 
-  const systemPrompt = `You are an elite YouTube scriptwriter. Write original, natural, punchy spoken narration in the requested language with zero filler greetings ("Hey guys welcome back"). Match the spoken word count strictly to the target duration (${words.min}-${words.max} spoken words). Do not fabricate facts. Return strictly valid JSON.`;
+  const systemPrompt = `You are an elite YouTube scriptwriter.
+CRITICAL LANGUAGE RULE: ${lang.scriptInstruction} Every single field (titleIdea, hook, narrationText, fullScript, ending, callToAction) MUST be written in ${lang.name}. NEVER default to English if the requested language is ${lang.name}.
+Write original, natural, punchy spoken narration with zero filler greetings ("Hey guys welcome back") and zero stage directions/brackets inside narrationText. Match the spoken word count strictly to the target duration (${words.min}-${words.max} spoken words). Do not fabricate facts. Return strictly valid JSON.`;
 
   const userPrompt = JSON.stringify({
     topic: params.topic,
     niche: params.niche,
-    language: params.language,
+    targetLanguageCode: lang.code,
+    targetLanguageName: lang.name,
+    languageRequirement: lang.scriptInstruction,
     contentStyle: params.contentStyle,
     tone: params.tone || 'engaging',
     durationSeconds: params.durationSeconds,
     targetWordRange: words,
     verifiedReferences: params.references || [],
     requiredJsonSchema: {
-      titleIdea: 'string',
-      hook: 'string (first 3 seconds spoken hook)',
-      narrationText: 'string (complete spoken narration from hook to ending, ready for TTS)',
-      fullScript: 'string (formatted script with section markers)',
-      ending: 'string',
-      callToAction: 'string',
+      titleIdea: `string (in ${lang.name})`,
+      hook: `string (first 3 seconds spoken hook in ${lang.name})`,
+      narrationText: `string (complete continuous spoken narration in ${lang.name} from hook to ending, ready for TTS, no stage brackets or markdown)`,
+      fullScript: `string (formatted script in ${lang.name})`,
+      ending: `string (in ${lang.name})`,
+      callToAction: `string (in ${lang.name})`,
     },
   });
 
@@ -418,14 +507,22 @@ export async function generateSceneBreakdownWithAI(
     format: '9:16' | '16:9' | '1:1';
   }
 ): Promise<GeneratedScene[]> {
-  const recommendedScenes = Math.max(4, Math.min(18, Math.round(params.durationSeconds / 5)));
+  const recommendedScenes = Math.max(4, Math.min(18, Math.round(params.durationSeconds / 4.5)));
+  const lang = resolveLanguageMeta(params.language);
 
-  const systemPrompt = `You are a documentary video director breaking a narration script into visual scenes for stock footage assembly (Pexels / Pixabay). Every scene's search keywords MUST be concise English visual search queries (2-4 words) that return high-relevance real stock footage, regardless of the narration language. Return strictly valid JSON.`;
+  const systemPrompt = `You are a documentary video director breaking a spoken narration script into tightly synchronized visual scenes for stock footage assembly (Pexels / Pixabay).
+RULES:
+1. VERBATIM NARRATION COVERAGE: Split narrationText sequentially from start to finish so concatenating all scenes[].narration reproduces 100% of narrationText in exact order without skipping, summarizing, or translating a single sentence.
+2. SUBTITLE LANGUAGE: Both narration and subtitleText MUST stay strictly in ${lang.name} (matching narrationText verbatim).
+3. FILMABLE ENGLISH VISUAL QUERIES: primaryKeyword and alternativeKeywords MUST be concise, concrete, literally filmable English stock-video queries (2-3 words) depicting the exact physical subject or action spoken in that scene (e.g. "smartphone screen hand", "server room glowing", "doctor examining xray", "rocket launch fire"). NEVER use abstract words like "facts", "secret", "future", "success", "concept", "motivation", or the full sentence.
+4. DYNAMIC FOOTAGE: Prefer "video" for mediaTypePreference on almost all scenes so clips have natural motion without frozen frames.
+Return strictly valid JSON.`;
 
   const userPrompt = JSON.stringify({
     topic: params.topic,
     niche: params.niche,
-    narrationLanguage: params.language,
+    narrationLanguageCode: lang.code,
+    narrationLanguageName: lang.name,
     format: params.format,
     targetTotalDurationSeconds: params.durationSeconds,
     recommendedSceneCount: recommendedScenes,
@@ -434,14 +531,14 @@ export async function generateSceneBreakdownWithAI(
       scenes: [
         {
           sceneNumber: 1,
-          narration: 'exact narration segment in original language',
-          estimatedDuration: 5.5,
-          visualDescription: 'detailed visual description',
-          primaryKeyword: 'english stock footage query',
-          alternativeKeywords: ['english alt query 1', 'english alt query 2'],
+          narration: `exact verbatim segment from narrationText in ${lang.name}`,
+          estimatedDuration: 4.5,
+          visualDescription: 'concrete physical visual scene matching what is being said right now',
+          primaryKeyword: 'concrete 2-3 word english stock footage query',
+          alternativeKeywords: ['concrete english alt query 1', 'concrete english alt query 2'],
           mediaTypePreference: 'video',
           transition: 'fade',
-          subtitleText: 'clean subtitle text matching narration segment',
+          subtitleText: `exact verbatim subtitle text in ${lang.name} matching narration`,
         },
       ],
     },
@@ -455,9 +552,9 @@ export async function generateSceneBreakdownWithAI(
   return scenes.map((s, idx) => ({
     sceneNumber: idx + 1,
     narration: (s.narration || '').trim(),
-    estimatedDuration: Math.max(2, Number(s.estimatedDuration || 5)),
+    estimatedDuration: Math.max(2, Number(s.estimatedDuration || 4.5)),
     visualDescription: (s.visualDescription || params.topic).trim(),
-    primaryKeyword: (s.primaryKeyword || params.topic).trim(),
+    primaryKeyword: (s.primaryKeyword || params.niche).trim(),
     alternativeKeywords: Array.isArray(s.alternativeKeywords) ? s.alternativeKeywords : [],
     mediaTypePreference: s.mediaTypePreference === 'image' ? 'image' : 'video',
     transition: s.transition || 'fade',
@@ -476,22 +573,28 @@ export async function generateSeoMetadataWithAI(
     references?: ResearchReference[];
   }
 ): Promise<GeneratedSeoMetadata> {
-  const systemPrompt = `You are a YouTube SEO specialist. Generate accurate, non-misleading metadata matching the actual video narration. Include 3-5 concise hashtags and a crisp 2-4 word thumbnail headline with high readability. Return strictly valid JSON.`;
+  const lang = resolveLanguageMeta(params.language);
+
+  const systemPrompt = `You are a YouTube SEO specialist.
+CRITICAL LANGUAGE RULE: ${lang.scriptInstruction} Write title, description, tags, and thumbnailHeadline strictly in ${lang.name} to match the video's spoken language.
+Generate accurate, non-misleading metadata matching the actual video narration. Include 3-5 concise hashtags and a crisp 2-4 word thumbnail headline with high readability. Return strictly valid JSON.`;
 
   const userPrompt = JSON.stringify({
     topic: params.topic,
     niche: params.niche,
-    language: params.language,
+    targetLanguageCode: lang.code,
+    targetLanguageName: lang.name,
+    languageRequirement: lang.scriptInstruction,
     format: params.format,
     narrationSummary: params.narrationText.slice(0, 2000),
     references: params.references || [],
     requiredJsonSchema: {
-      title: 'string (<= 95 chars, compelling & accurate)',
-      description: 'string (engaging description with key takeaways and references if provided)',
+      title: `string (<= 95 chars, compelling & accurate, in ${lang.name})`,
+      description: `string (engaging description in ${lang.name} with key takeaways and references if provided)`,
       tags: ['tag1', 'tag2'],
       hashtags: ['#tag1', '#tag2'],
       categoryId: '27 (YouTube numeric category ID as string, e.g. 27 Education, 28 Science & Tech)',
-      thumbnailHeadline: 'string (2-4 bold words)',
+      thumbnailHeadline: `string (2-4 bold words in ${lang.name})`,
       thumbnailVisualPrompt: 'string',
     },
   });

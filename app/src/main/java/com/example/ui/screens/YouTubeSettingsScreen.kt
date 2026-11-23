@@ -19,6 +19,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.LinkOff
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Security
@@ -59,6 +60,7 @@ fun YouTubeSettingsScreen(
     onRefresh: () -> Unit,
     onManualRefresh: () -> Unit = onRefresh,
     onConnectYouTube: () -> Unit,
+    onSetDefaultYouTube: (String) -> Unit = {},
     onDisconnectYouTube: (String?) -> Unit,
     onBack: () -> Unit
 ) {
@@ -211,7 +213,10 @@ fun YouTubeSettingsScreen(
                             }
                             Spacer(modifier = Modifier.width(12.dp))
                             Column(modifier = Modifier.weight(1f)) {
-                                Text(channel.channelName, style = MaterialTheme.typography.titleMedium)
+                                Text(
+                                    text = if (channel.isDefault) "${channel.channelName} (Default)" else channel.channelName,
+                                    style = MaterialTheme.typography.titleMedium
+                                )
                                 Text(
                                     text = "${channel.channelHandle ?: channel.channelId} • ${channel.subscriberCount} subscribers",
                                     style = MaterialTheme.typography.bodySmall,
@@ -221,16 +226,34 @@ fun YouTubeSettingsScreen(
                             StatusPill(status = channel.tokenStatus)
                         }
 
-                        OutlinedButton(
-                            onClick = { onDisconnectYouTube(channel.id) },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(48.dp)
-                                .testTag("youtube_disconnect_button_${channel.id}")
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Icon(Icons.Rounded.LinkOff, contentDescription = null, tint = StudioErrorRed)
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("Disconnect Channel", color = StudioErrorRed)
+                            if (!channel.isDefault && channels.size > 1) {
+                                OutlinedButton(
+                                    onClick = { onSetDefaultYouTube(channel.id) },
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(48.dp)
+                                        .testTag("youtube_set_default_button_${channel.id}")
+                                ) {
+                                    Icon(Icons.Rounded.CheckCircle, contentDescription = null, tint = PipelineCyan)
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Set Default")
+                                }
+                            }
+                            OutlinedButton(
+                                onClick = { onDisconnectYouTube(channel.id) },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(48.dp)
+                                    .testTag("youtube_disconnect_button_${channel.id}")
+                            ) {
+                                Icon(Icons.Rounded.LinkOff, contentDescription = null, tint = StudioErrorRed)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Disconnect", color = StudioErrorRed)
+                            }
                         }
                     }
                 }

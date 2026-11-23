@@ -4,6 +4,7 @@ import { promisify } from 'node:util';
 import { config, sanitizeErrorMessage } from '../config/env.js';
 import { uploadToStorageWithAutoBucket } from '../db/supabase.js';
 import { resolveConfinedPath } from '../security/urlGuard.js';
+import { resolveLanguageMeta } from './aiProvider.js';
 import { resolveUserProviderKey } from './credentialService.js';
 
 const execFileAsync = promisify(execFile);
@@ -139,6 +140,7 @@ async function generateWithGeminiTts(
     cred.apiKey
   )}`;
 
+  const langMeta = resolveLanguageMeta(req.language);
   const res = await fetch(endpoint, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -147,7 +149,7 @@ async function generateWithGeminiTts(
         {
           parts: [
             {
-              text: `Read the following narration naturally in ${req.language} at ${req.speed}x pacing:\n\n${req.text}`,
+              text: `Read the following narration aloud naturally in ${langMeta.ttsName} with authentic native pronunciation and clear expressive pacing (${req.speed}x speed). Speak ONLY the script text below without adding any extra words:\n\n${req.text}`,
             },
           ],
         },

@@ -22,10 +22,16 @@ import {
   type SupportedProvider,
 } from '../services/credentialService.js';
 import {
+  computeNextScheduledSlotIso,
+  extractChannelSchedules,
+  resolveEarliestNextRunIso,
+} from '../scheduler.js';
+import {
   buildYouTubeOAuthConsentUrl,
   disconnectYouTubeAccount,
   handleYouTubeOAuthCallback,
   listUserYouTubeAccounts,
+  setDefaultYouTubeAccount,
 } from '../services/youtubeService.js';
 
 export const apiRouter = Router();
@@ -410,6 +416,17 @@ apiRouter.get('/youtube/status', async (req: AuthenticatedRequest, res: Response
   }
 });
 
+apiRouter.post('/youtube/default', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const userId = getAuthUserId(req);
+    const body = z.object({ accountId: z.string().uuid() }).parse(req.body);
+    const accounts = await setDefaultYouTubeAccount(userId, body.accountId);
+    res.json({ accounts });
+  } catch (err) {
+    res.status(400).json({ error: sanitizeErrorMessage(err) });
+  }
+});
+
 apiRouter.post('/youtube/disconnect', async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = getAuthUserId(req);
@@ -465,6 +482,7 @@ apiRouter.post('/projects', sensitiveRateLimiter, async (req: AuthenticatedReque
       autoUpload: z.boolean().default(false),
       privacyStatus: z.enum(['private', 'unlisted', 'public']).default('private'),
       scheduledPublishTime: z.string().nullable().optional(),
+      youtubeAccountId: z.string().uuid().nullable().optional(),
       startImmediately: z.boolean().default(true),
     });
     const body = schema.parse(req.body);
@@ -494,6 +512,7 @@ apiRouter.post('/projects', sensitiveRateLimiter, async (req: AuthenticatedReque
           auto_upload: body.autoUpload,
           privacy_status: body.privacyStatus,
           scheduled_publish_time: body.scheduledPublishTime || null,
+          youtube_account_id: body.youtubeAccountId || null,
         },
         status: 'queued',
       })
@@ -1008,7 +1027,35 @@ apiRouter.put('/automation/settings', async (req: AuthenticatedRequest, res: Res
       })
       .parse(req.body);
 
-    const nextRun = computeNextRunIso(body.publishingTimes[0]);
+    const now = new Date();
+    const rawPrefs = { ...(body.preferences || {}) };
+    const channelSchedules = extractChannelSchedules(rawPrefs).map((cs) => ({
+      ...cs,
+      nextRunAt: cs.enabled
+        ? computeNextScheduledSlotIso({
+            publishingTimes: cs.publishingTimes?.length ? cs.publishingTimes : body.publishingTimes,
+            daysOfWeek: cs.daysOfWeek?.length ? cs.daysOfWeek : body.daysOfWeek,
+            timezone: cs.timezone || body.timezone,
+            now,
+          })
+        : null,
+    }));
+
+    if (channelSchedules.length > 0) {
+      rawPrefs.channel_schedules = channelSchedules;
+    }
+
+    const fallbackNextRun = computeNextScheduledSlotIso({
+      publishingTimes: body.publishingTimes,
+      daysOfWeek: body.daysOfWeek,
+      timezone: body.timezone,
+      now,
+    });
+    const nextRun =
+      channelSchedules.length > 0
+        ? resolveEarliestNextRunIso(channelSchedules, fallbackNextRun)
+        : fallbackNextRun;
+
     const supabase = getSupabaseAdmin();
     const { data, error } = await supabase
       .from('schedules')
@@ -1025,7 +1072,7 @@ apiRouter.put('/automation/settings', async (req: AuthenticatedRequest, res: Res
           publishing_times: body.publishingTimes,
           days_of_week: body.daysOfWeek,
           timezone: body.timezone,
-          preferences: body.preferences,
+          preferences: rawPrefs,
           next_run_at: nextRun,
         },
         { onConflict: 'user_id' }
@@ -1044,11 +1091,65 @@ apiRouter.post('/automation/start', async (req: AuthenticatedRequest, res: Respo
   try {
     const userId = getAuthUserId(req);
     const supabase = getSupabaseAdmin();
-    const nextRun = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+    const now = new Date();
+
+    const { data: existing } = await supabase
+      .from('schedules')
+      .select('*')
+      .eq('user_id', userId)
+      .maybeSingle();
+
+    const pubTimes =
+      Array.isArray(existing?.publishing_times) && existing.publishing_times.length > 0
+        ? (existing.publishing_times as string[])
+        : ['18:00'];
+    const days =
+      Array.isArray(existing?.days_of_week) && existing.days_of_week.length > 0
+        ? (existing.days_of_week as string[])
+        : ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
+    const tz = typeof existing?.timezone === 'string' && existing.timezone ? existing.timezone : 'Asia/Kolkata';
+
+    const existingPrefs = ((existing?.preferences || {}) as Record<string, unknown>);
+    const channelSchedules = extractChannelSchedules(existingPrefs).map((cs) => ({
+      ...cs,
+      nextRunAt: cs.enabled
+        ? computeNextScheduledSlotIso({
+            publishingTimes: cs.publishingTimes?.length ? cs.publishingTimes : pubTimes,
+            daysOfWeek: cs.daysOfWeek?.length ? cs.daysOfWeek : days,
+            timezone: cs.timezone || tz,
+            now,
+          })
+        : null,
+    }));
+
+    const fallbackNextRun = computeNextScheduledSlotIso({
+      publishingTimes: pubTimes,
+      daysOfWeek: days,
+      timezone: tz,
+      now,
+    });
+    const nextRun =
+      channelSchedules.length > 0
+        ? resolveEarliestNextRunIso(channelSchedules, fallbackNextRun)
+        : fallbackNextRun;
+
+    const updatedPrefs =
+      channelSchedules.length > 0
+        ? { ...existingPrefs, channel_schedules: channelSchedules }
+        : existingPrefs;
+
     const { data, error } = await supabase
       .from('schedules')
       .upsert(
-        { user_id: userId, enabled: true, next_run_at: nextRun },
+        {
+          user_id: userId,
+          enabled: true,
+          timezone: tz,
+          publishing_times: pubTimes,
+          days_of_week: days,
+          preferences: updatedPrefs,
+          next_run_at: nextRun,
+        },
         { onConflict: 'user_id' }
       )
       .select('*')
@@ -1135,16 +1236,6 @@ apiRouter.get('/notifications', async (req: AuthenticatedRequest, res: Response)
   }
 });
 
-function computeNextRunIso(hhmm: string): string {
-  const [h, m] = hhmm.split(':').map(Number);
-  const now = new Date();
-  const next = new Date(now);
-  next.setUTCHours(Number.isFinite(h) ? h : 14, Number.isFinite(m) ? m : 0, 0, 0);
-  if (next <= now) {
-    next.setUTCDate(next.getUTCDate() + 1);
-  }
-  return next.toISOString();
-}
 
 async function enforceUserJobQuota(userId: string): Promise<void> {
   const supabase = getSupabaseAdmin();

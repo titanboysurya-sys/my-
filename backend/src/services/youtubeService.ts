@@ -120,6 +120,12 @@ export async function handleYouTubeOAuthCallback(
   const supabase = getSupabaseAdmin();
   const saved: YouTubeChannelSummary[] = [];
 
+  const { data: existingAccounts } = await supabase
+    .from('youtube_accounts')
+    .select('id, channel_id, is_default')
+    .eq('user_id', userId);
+  const existingDefaultChannelId = (existingAccounts || []).find((a) => a.is_default)?.channel_id || null;
+
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
 
@@ -151,6 +157,10 @@ export async function handleYouTubeOAuthCallback(
       };
     }
 
+    const shouldBeDefault = existingDefaultChannelId
+      ? existingDefaultChannelId === item.id
+      : i === 0;
+
     const { data, error } = await supabase
       .from('youtube_accounts')
       .upsert(
@@ -167,7 +177,7 @@ export async function handleYouTubeOAuthCallback(
           token_auth_tag: encryptedPayload.authTag,
           scopes: YOUTUBE_SCOPES,
           token_status: 'connected',
-          is_default: i === 0,
+          is_default: shouldBeDefault,
           last_error: null,
         },
         { onConflict: 'user_id,channel_id' }
@@ -224,6 +234,35 @@ export async function listUserYouTubeAccounts(userId: string): Promise<YouTubeCh
   }));
 }
 
+export async function setDefaultYouTubeAccount(
+  userId: string,
+  accountId: string
+): Promise<YouTubeChannelSummary[]> {
+  const supabase = getSupabaseAdmin();
+  const { data: target, error: checkErr } = await supabase
+    .from('youtube_accounts')
+    .select('id')
+    .eq('user_id', userId)
+    .eq('id', accountId)
+    .maybeSingle();
+
+  if (checkErr || !target) {
+    throw new Error('Selected YouTube channel was not found.');
+  }
+
+  await supabase.from('youtube_accounts').update({ is_default: false }).eq('user_id', userId);
+  const { error: setErr } = await supabase
+    .from('youtube_accounts')
+    .update({ is_default: true })
+    .eq('user_id', userId)
+    .eq('id', accountId);
+
+  if (setErr) {
+    throw new Error(`Failed to set default YouTube channel: ${setErr.message}`);
+  }
+  return listUserYouTubeAccounts(userId);
+}
+
 export async function disconnectYouTubeAccount(userId: string, accountId?: string): Promise<void> {
   const supabase = getSupabaseAdmin();
   let query = supabase.from('youtube_accounts').delete().eq('user_id', userId);
@@ -257,7 +296,11 @@ export async function getFreshYouTubeAccessToken(
 
   const { data: account, error } = await query.maybeSingle();
   if (error || !account) {
-    throw new Error('No connected YouTube channel found. Connect YouTube in Settings first.');
+    throw new Error(
+      accountId
+        ? 'Selected YouTube channel is disconnected or unavailable. Reconnect it in YouTube Settings.'
+        : 'No connected YouTube channel found. Connect YouTube in Settings first.'
+    );
   }
 
   const refreshToken = decryptSecret(
@@ -314,6 +357,7 @@ export async function getFreshYouTubeAccessToken(
 export interface YouTubeResumableUploadInput {
   userId: string;
   projectId: string;
+  youtubeAccountId?: string | null;
   localVideoPath: string;
   localThumbnailPath?: string | null;
   title: string;
@@ -332,7 +376,12 @@ export interface YouTubeResumableUploadInput {
  */
 export async function uploadVideoToYouTubeResumable(
   input: YouTubeResumableUploadInput
-): Promise<{ youtubeVideoId: string; videoUrl: string; status: 'scheduled' | 'published' }> {
+): Promise<{
+  youtubeVideoId: string;
+  videoUrl: string;
+  status: 'scheduled' | 'published';
+  channelName?: string;
+}> {
   const supabase = getSupabaseAdmin();
 
   // Duplicate upload protection
@@ -351,7 +400,10 @@ export async function uploadVideoToYouTubeResumable(
     };
   }
 
-  const { accessToken, accountRowId } = await getFreshYouTubeAccessToken(input.userId);
+  const { accessToken, accountRowId, channelName } = await getFreshYouTubeAccessToken(
+    input.userId,
+    input.youtubeAccountId || undefined
+  );
   const videoBuffer = await fs.readFile(input.localVideoPath);
   const totalBytes = videoBuffer.length;
 
@@ -504,5 +556,5 @@ export async function uploadVideoToYouTubeResumable(
     })
     .eq('idempotency_key', input.idempotencyKey);
 
-  return { youtubeVideoId: uploadedVideoId, videoUrl, status: finalStatus };
+  return { youtubeVideoId: uploadedVideoId, videoUrl, status: finalStatus, channelName };
 }

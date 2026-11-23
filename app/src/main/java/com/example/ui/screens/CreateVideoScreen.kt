@@ -17,14 +17,19 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material.icons.rounded.Explore
 import androidx.compose.material.icons.rounded.RocketLaunch
+import androidx.compose.material.icons.rounded.Schedule
+import androidx.compose.material.icons.rounded.SmartDisplay
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDialog
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -32,23 +37,39 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
+import com.example.core.database.CachedYouTubeChannelEntity
 import com.example.core.datastore.StudioAppSettings
 import com.example.core.network.CreateProjectRequest
 import com.example.core.network.TopicResearchRequest
 import com.example.ui.components.StudioSectionHeader
+import com.example.ui.components.StudioTimePickerDialog
+import com.example.ui.components.buildUtcIsoFromLocalDateTime
+import com.example.ui.components.defaultCountryForLanguage
+import com.example.ui.components.format24hTo12hDisplay
+import com.example.ui.components.formatHourMinute24
+import com.example.ui.components.formatIsoToLocalDisplay
+import com.example.ui.components.formatLocalDateSummary
 import com.example.ui.theme.PipelineCyan
 import com.example.ui.theme.SignalCrimson
+import com.example.ui.theme.StudioAmber
 import com.example.ui.viewmodel.StudioUiState
+import java.util.Calendar
+import java.util.TimeZone
 
 val ALL_STUDIO_NICHES = listOf(
     "Facts", "History", "Technology", "AI News", "Educational", "Comedy",
@@ -58,7 +79,8 @@ val ALL_STUDIO_NICHES = listOf(
 
 val STUDIO_LANGUAGES = listOf(
     "en" to "English",
-    "hi" to "Hindi",
+    "hi" to "Hindi (हिंदी)",
+    "hinglish" to "Hinglish",
     "es" to "Spanish",
     "fr" to "French",
     "de" to "German",
@@ -70,11 +92,12 @@ val STUDIO_CONTENT_STYLES = listOf(
     "documentary", "storytelling", "fast_facts", "explainer", "news_brief", "cinematic"
 )
 
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun CreateVideoScreen(
     settings: StudioAppSettings,
     uiState: StudioUiState,
+    channels: List<CachedYouTubeChannelEntity> = emptyList(),
     onResearchTopics: (TopicResearchRequest) -> Unit,
     onGenerateVideo: (CreateProjectRequest) -> Unit
 ) {
@@ -90,6 +113,84 @@ fun CreateVideoScreen(
     var autoProduce by rememberSaveable { mutableStateOf(true) }
     var autoUpload by rememberSaveable { mutableStateOf(false) }
     var privacyStatus by rememberSaveable { mutableStateOf("private") }
+
+    // Target YouTube channel selector (prevents accidental upload to wrong/multiple channels)
+    val defaultChannelId = channels.firstOrNull { it.isDefault }?.id ?: channels.firstOrNull()?.id
+    var selectedChannelId by rememberSaveable { mutableStateOf(defaultChannelId) }
+    LaunchedEffect(channels) {
+        if (selectedChannelId == null || channels.none { it.id == selectedChannelId }) {
+            selectedChannelId = channels.firstOrNull { it.isDefault }?.id ?: channels.firstOrNull()?.id
+        }
+    }
+
+    // Optional Scheduled Publish Date & Time (YouTube status.publishAt)
+    var schedulePublishLater by rememberSaveable { mutableStateOf(false) }
+    val initialScheduleCal = remember {
+        Calendar.getInstance().apply {
+            add(Calendar.HOUR_OF_DAY, 2)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }
+    }
+    val initialUtcDateMillis = remember {
+        Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply {
+            set(Calendar.YEAR, initialScheduleCal.get(Calendar.YEAR))
+            set(Calendar.MONTH, initialScheduleCal.get(Calendar.MONTH))
+            set(Calendar.DAY_OF_MONTH, initialScheduleCal.get(Calendar.DAY_OF_MONTH))
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }.timeInMillis
+    }
+    var scheduledDateMillis by rememberSaveable { mutableLongStateOf(initialUtcDateMillis) }
+    var scheduledHour by rememberSaveable { mutableIntStateOf(initialScheduleCal.get(Calendar.HOUR_OF_DAY)) }
+    var scheduledMinute by rememberSaveable { mutableIntStateOf(initialScheduleCal.get(Calendar.MINUTE)) }
+    var showDatePicker by remember { mutableStateOf(false) }
+    var showTimePicker by remember { mutableStateOf(false) }
+
+    val computedPublishAtIso = if (autoUpload && schedulePublishLater) {
+        buildUtcIsoFromLocalDateTime(
+            dateMillisUtcMidnight = scheduledDateMillis,
+            hour24 = scheduledHour,
+            minute = scheduledMinute
+        )
+    } else {
+        null
+    }
+
+    if (showDatePicker) {
+        val datePickerState = rememberDatePickerState(initialSelectedDateMillis = scheduledDateMillis)
+        DatePickerDialog(
+            onDismissRequest = { showDatePicker = false },
+            confirmButton = {
+                TextButton(onClick = {
+                    datePickerState.selectedDateMillis?.let { scheduledDateMillis = it }
+                    showDatePicker = false
+                }) { Text("Confirm") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDatePicker = false }) { Text("Cancel") }
+            }
+        ) {
+            DatePicker(state = datePickerState)
+        }
+    }
+
+    if (showTimePicker) {
+        StudioTimePickerDialog(
+            title = "Select Publish Time",
+            initialHour = scheduledHour,
+            initialMinute = scheduledMinute,
+            onDismiss = { showTimePicker = false },
+            onConfirm = { h, m ->
+                scheduledHour = h
+                scheduledMinute = m
+                showTimePicker = false
+            }
+        )
+    }
 
     LazyColumn(
         modifier = Modifier
@@ -147,6 +248,7 @@ fun CreateVideoScreen(
                                 TopicResearchRequest(
                                     niche = selectedNiche,
                                     language = selectedLanguage,
+                                    audienceCountry = defaultCountryForLanguage(selectedLanguage),
                                     contentStyle = selectedStyle,
                                     durationSeconds = selectedDuration,
                                     topicType = selectedTopicType,
@@ -240,13 +342,17 @@ fun CreateVideoScreen(
                         }
                     }
 
-                    Text("Language", style = MaterialTheme.typography.titleMedium)
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Video Script, Voice & Subtitle Language", style = MaterialTheme.typography.titleMedium)
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
                         STUDIO_LANGUAGES.forEach { (code, label) ->
                             FilterChip(
                                 selected = selectedLanguage == code,
                                 onClick = { selectedLanguage = code },
-                                label = { Text(label) }
+                                label = { Text(label) },
+                                modifier = Modifier.testTag("create_lang_$code")
                             )
                         }
                     }
@@ -328,7 +434,7 @@ fun CreateVideoScreen(
             }
         }
 
-        // Production & YouTube Upload Options
+        // Production, Target Channel & Scheduled YouTube Upload Options
         item {
             Card(
                 shape = MaterialTheme.shapes.medium,
@@ -370,7 +476,7 @@ fun CreateVideoScreen(
                         Column(modifier = Modifier.weight(1f)) {
                             Text("Auto-Upload to YouTube", style = MaterialTheme.typography.titleMedium)
                             Text(
-                                text = "Uploads rendered video + thumbnail to your connected channel",
+                                text = "Upload directly to the exact channel & publish time you choose below",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -383,13 +489,100 @@ fun CreateVideoScreen(
                     }
 
                     if (autoUpload) {
+                        // Target YouTube Channel Selector
+                        Text("Target YouTube Channel", style = MaterialTheme.typography.titleSmall)
+                        if (channels.isEmpty()) {
+                            Text(
+                                text = "No YouTube channel connected yet. Connect a channel in Settings -> YouTube first.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = StudioAmber
+                            )
+                        } else {
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                channels.forEach { ch ->
+                                    FilterChip(
+                                        selected = selectedChannelId == ch.id,
+                                        onClick = { selectedChannelId = ch.id },
+                                        leadingIcon = {
+                                            Icon(
+                                                imageVector = Icons.Rounded.SmartDisplay,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        },
+                                        label = {
+                                            Text(if (ch.isDefault) "${ch.channelName} ★" else ch.channelName)
+                                        },
+                                        modifier = Modifier.testTag("create_channel_${ch.id}")
+                                    )
+                                }
+                            }
+                        }
+
+                        // Publish Timing: Immediate vs Schedule Date & Time
+                        Text("Publish Timing", style = MaterialTheme.typography.titleSmall)
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            listOf("private" to "Private", "unlisted" to "Unlisted", "public" to "Public").forEach { (p, label) ->
-                                FilterChip(
-                                    selected = privacyStatus == p,
-                                    onClick = { privacyStatus = p },
-                                    label = { Text(label) }
+                            FilterChip(
+                                selected = !schedulePublishLater,
+                                onClick = { schedulePublishLater = false },
+                                label = { Text("Publish Right Away") },
+                                modifier = Modifier.testTag("create_publish_now_chip")
+                            )
+                            FilterChip(
+                                selected = schedulePublishLater,
+                                onClick = { schedulePublishLater = true },
+                                label = { Text("Schedule Date & Time") },
+                                modifier = Modifier.testTag("create_schedule_later_chip")
+                            )
+                        }
+
+                        if (schedulePublishLater) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                OutlinedButton(
+                                    onClick = { showDatePicker = true },
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(48.dp)
+                                        .testTag("create_pick_date_button")
+                                ) {
+                                    Icon(Icons.Rounded.CalendarMonth, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(formatLocalDateSummary(scheduledDateMillis), maxLines = 1)
+                                }
+                                OutlinedButton(
+                                    onClick = { showTimePicker = true },
+                                    modifier = Modifier
+                                        .weight(0.85f)
+                                        .height(48.dp)
+                                        .testTag("create_pick_time_button")
+                                ) {
+                                    Icon(Icons.Rounded.Schedule, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(format24hTo12hDisplay(formatHourMinute24(scheduledHour, scheduledMinute)))
+                                }
+                            }
+                            formatIsoToLocalDisplay(computedPublishAtIso)?.let { localLabel ->
+                                Text(
+                                    text = "YouTube will automatically publish at: $localLabel",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = PipelineCyan
                                 )
+                            }
+                        } else {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                listOf("private" to "Private", "unlisted" to "Unlisted", "public" to "Public").forEach { (p, label) ->
+                                    FilterChip(
+                                        selected = privacyStatus == p,
+                                        onClick = { privacyStatus = p },
+                                        label = { Text(label) }
+                                    )
+                                }
                             }
                         }
                     }
@@ -408,6 +601,7 @@ fun CreateVideoScreen(
                             topic = effectiveTopic,
                             niche = selectedNiche,
                             language = selectedLanguage,
+                            audienceCountry = defaultCountryForLanguage(selectedLanguage),
                             contentStyle = selectedStyle,
                             topicType = selectedTopicType,
                             format = selectedFormat,
@@ -416,7 +610,9 @@ fun CreateVideoScreen(
                             autoProduce = autoProduce,
                             voiceProvider = selectedVoiceProvider,
                             autoUpload = autoUpload,
-                            privacyStatus = privacyStatus,
+                            privacyStatus = if (schedulePublishLater) "private" else privacyStatus,
+                            scheduledPublishTime = computedPublishAtIso,
+                            youtubeAccountId = if (autoUpload) selectedChannelId else null,
                             startImmediately = true
                         )
                     )

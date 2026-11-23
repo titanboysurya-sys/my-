@@ -320,6 +320,7 @@ private fun AutoTubeStudioRoot(viewModel: StudioViewModel) {
                                 CreateVideoScreen(
                                     settings = settings,
                                     uiState = uiState,
+                                    channels = channels,
                                     onResearchTopics = viewModel::researchTopics,
                                     onGenerateVideo = viewModel::createProjectAndGenerate
                                 )
@@ -328,6 +329,7 @@ private fun AutoTubeStudioRoot(viewModel: StudioViewModel) {
                             composable(StudioRoutes.AUTOMATION) {
                                 AutomationScreen(
                                     uiState = uiState,
+                                    channels = channels,
                                     onSaveSchedule = viewModel::saveAutomationSettings,
                                     onToggleAutomation = viewModel::toggleAutomation,
                                     onGenerateNow = viewModel::createProjectAndGenerate
@@ -393,6 +395,7 @@ private fun AutoTubeStudioRoot(viewModel: StudioViewModel) {
                                     onRefresh = { viewModel.refreshYouTubeAccounts(showFeedback = false) },
                                     onManualRefresh = { viewModel.refreshYouTubeAccounts(showFeedback = true) },
                                     onConnectYouTube = viewModel::initiateYouTubeConnect,
+                                    onSetDefaultYouTube = viewModel::setDefaultYouTube,
                                     onDisconnectYouTube = viewModel::disconnectYouTube,
                                     onBack = { navController.popBackStack() }
                                 )

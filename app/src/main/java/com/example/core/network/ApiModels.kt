@@ -138,6 +138,11 @@ data class YouTubeDisconnectRequest(
     val accountId: String? = null
 )
 
+@JsonClass(generateAdapter = true)
+data class SetDefaultYouTubeRequest(
+    val accountId: String
+)
+
 // --- Topic Research ---
 @JsonClass(generateAdapter = true)
 data class TopicResearchRequest(
@@ -191,6 +196,7 @@ data class CreateProjectRequest(
     val autoUpload: Boolean = false,
     val privacyStatus: String = "private",
     val scheduledPublishTime: String? = null,
+    val youtubeAccountId: String? = null,
     val startImmediately: Boolean = true
 )
 

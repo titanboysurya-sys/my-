@@ -10,16 +10,24 @@ import {
 } from '../src/security/crypto.js';
 import { assertSafeExternalUrl, resolveConfinedPath } from '../src/security/urlGuard.js';
 import { sanitizeErrorMessage } from '../src/config/env.js';
-import { targetWordRangeForDuration } from '../src/services/aiProvider.js';
+import { resolveLanguageMeta, targetWordRangeForDuration } from '../src/services/aiProvider.js';
 import { scoreMediaCandidate, type MediaCandidate } from '../src/services/mediaSearchService.js';
 import { wrapPcm16AsWav } from '../src/services/voiceService.js';
-import { buildSynchronizedSrt, resolveOutputDimensions } from '../src/services/ffmpegRenderer.js';
+import {
+  buildSynchronizedAss,
+  buildSynchronizedSrt,
+  calibrateClipDurations,
+  resolveOutputDimensions,
+} from '../src/services/ffmpegRenderer.js';
 import {
   computeRetryBackoffSeconds,
   isPermanentError,
   shouldSkipStage,
 } from '../src/services/pipelineExecutor.js';
-import { buildScheduleSlotIdempotencyKey } from '../src/scheduler.js';
+import {
+  buildScheduleSlotIdempotencyKey,
+  computeNextScheduledSlotIso,
+} from '../src/scheduler.js';
 
 const TEST_ENC_KEY = crypto.randomBytes(32).toString('hex');
 
@@ -178,4 +186,82 @@ test('Scheduler produces identical idempotency key within same UTC hour slot to 
     buildScheduleSlotIdempotencyKey('user-1', t1),
     buildScheduleSlotIdempotencyKey('user-1', t3)
   );
+  // Multi-channel schedules in the same hour generate distinct non-colliding keys
+  assert.notEqual(
+    buildScheduleSlotIdempotencyKey('user-1', t1, 'channel-aaa-111'),
+    buildScheduleSlotIdempotencyKey('user-1', t1, 'channel-bbb-222')
+  );
 });
+
+test('Timezone-aware scheduler computes exact UTC instant for Asia/Kolkata (+05:30) and respects weekdays', () => {
+  // 2026-11-22T10:00:00Z is Sunday 15:30 IST; scheduling 18:00 IST should yield 12:30Z same day
+  const now = new Date('2026-11-22T10:00:00.000Z');
+  const sameDayIst = computeNextScheduledSlotIso({
+    publishingTimes: ['18:00'],
+    daysOfWeek: ['sun', 'mon'],
+    timezone: 'Asia/Kolkata',
+    now,
+  });
+  assert.equal(sameDayIst, '2026-11-22T12:30:00.000Z');
+
+  // When Sunday is excluded, should jump to Monday 18:00 IST = 2026-11-23T12:30:00.000Z
+  const mondayIst = computeNextScheduledSlotIso({
+    publishingTimes: ['18:00'],
+    daysOfWeek: ['mon'],
+    timezone: 'Asia/Kolkata',
+    now,
+  });
+  assert.equal(mondayIst, '2026-11-23T12:30:00.000Z');
+});
+
+test('Word-calibrated scene timing and ASS subtitles lock voiceover sync and bottom-safe placement', () => {
+  const calibrated = calibrateClipDurations(
+    [
+      {
+        sceneNumber: 1,
+        localMediaPath: '/tmp/1.mp4',
+        mediaType: 'video',
+        durationSec: 5,
+        subtitleText: 'Short hook here',
+        transition: 'fade',
+      },
+      {
+        sceneNumber: 2,
+        localMediaPath: '/tmp/2.mp4',
+        mediaType: 'video',
+        durationSec: 5,
+        subtitleText:
+          'This second scene has a much longer explanation with many more spoken words to narrate accurately',
+        transition: 'fade',
+      },
+    ],
+    20
+  );
+  const sum = calibrated.reduce((a, c) => a + c.durationSec, 0);
+  assert.ok(Math.abs(sum - 20) < 0.05);
+  assert.ok(calibrated[1].durationSec > calibrated[0].durationSec * 2);
+
+  const ass = buildSynchronizedAss(calibrated, 720, 1280, {
+    enabled: true,
+    burnIn: true,
+    fontSize: 44,
+    primaryColor: '#FFFFFF',
+    outlineColor: '#000000',
+    position: 'bottom_safe',
+  });
+  assert.ok(ass.includes('PlayResX: 720'));
+  assert.ok(ass.includes('PlayResY: 1280'));
+  assert.ok(ass.includes(',2,58,58,179,1')); // bottom-center alignment=2, MarginV=179 (~14% of 1280)
+  assert.ok(ass.includes('Dialogue: 0,0:00:00.00,'));
+});
+
+test('Language resolver maps Hindi and Hinglish strictly to explicit instructions', () => {
+  const hi = resolveLanguageMeta('hi');
+  assert.equal(hi.ttsName, 'Hindi');
+  assert.ok(hi.scriptInstruction.includes('Devanagari'));
+
+  const hinglish = resolveLanguageMeta('hinglish');
+  assert.equal(hinglish.code, 'hinglish');
+  assert.ok(hinglish.scriptInstruction.includes('Roman'));
+});
+

@@ -81,32 +81,70 @@ export function scoreMediaCandidate(
   const minDim = Math.min(candidate.width, candidate.height);
   const resolutionScore = minDim >= 1080 ? 1.0 : minDim >= 720 ? 0.85 : minDim >= 480 ? 0.55 : 0.25;
 
-  // Duration suitability (for videos)
-  let durationScore = 0.8;
+  // Duration suitability (penalize ultra-short < 2.5s video clips that loop choppily)
+  let durationScore = 0.78;
   if (candidate.mediaType === 'video' && candidate.durationSec > 0) {
-    if (candidate.durationSec >= params.targetDurationSec && candidate.durationSec <= params.targetDurationSec * 4) {
+    if (candidate.durationSec < 2.2) {
+      durationScore = 0.2;
+    } else if (
+      candidate.durationSec >= params.targetDurationSec * 0.85 &&
+      candidate.durationSec <= params.targetDurationSec * 5
+    ) {
       durationScore = 1.0;
-    } else if (candidate.durationSec >= params.targetDurationSec * 0.6) {
+    } else if (candidate.durationSec >= 2.5) {
       durationScore = 0.75;
     } else {
       durationScore = 0.4;
     }
   }
 
-  const typeScore = candidate.mediaType === params.preferredType ? 1.0 : 0.65;
+  const typeScore = candidate.mediaType === params.preferredType ? 1.0 : 0.6;
 
   const weighted =
-    keywordScore * 0.42 +
-    orientationScore * 0.22 +
-    resolutionScore * 0.16 +
+    keywordScore * 0.48 +
+    orientationScore * 0.2 +
+    resolutionScore * 0.12 +
     durationScore * 0.12 +
     typeScore * 0.08;
 
   return Math.round(Math.max(0, Math.min(1, weighted)) * 1000) / 1000;
 }
 
+function extractUrlSlugText(url: string): string {
+  try {
+    const pathname = new URL(url).pathname;
+    return pathname
+      .replace(/\/(video|photo|videos|photos)\//gi, ' ')
+      .replace(/-\d+\/?$/g, ' ')
+      .replace(/[-_/]+/g, ' ')
+      .trim();
+  } catch {
+    return '';
+  }
+}
+
 function tokenize(input: string): Set<string> {
-  const stopWords = new Set(['the', 'and', 'for', 'with', 'from', 'that', 'this', 'into', 'shot', 'scene', 'view']);
+  const stopWords = new Set([
+    'the',
+    'and',
+    'for',
+    'with',
+    'from',
+    'that',
+    'this',
+    'into',
+    'shot',
+    'scene',
+    'view',
+    'video',
+    'photo',
+    'image',
+    'pexels',
+    'pixabay',
+    'free',
+    'stock',
+    'footage',
+  ]);
   return new Set(
     input
       .toLowerCase()
@@ -164,7 +202,7 @@ async function searchPexels(
           width: best.width || v.width,
           height: best.height || v.height,
           durationSec: v.duration || 5,
-          titleOrTags: `${query} ${v.url}`,
+          titleOrTags: extractUrlSlugText(v.url),
           authorName: v.user?.name || 'Pexels Creator',
           licenseMetadata: { license: 'Pexels License', attributionRequired: false },
         };
@@ -195,7 +233,7 @@ async function searchPexels(
           width: p.width,
           height: p.height,
           durationSec: 0,
-          titleOrTags: `${query} ${p.alt || ''}`,
+          titleOrTags: `${p.alt || ''} ${extractUrlSlugText(p.url)}`.trim(),
           authorName: p.photographer || 'Pexels Photographer',
           licenseMetadata: { license: 'Pexels License', attributionRequired: false },
         };
@@ -244,7 +282,7 @@ async function searchPixabay(
           width: stream.width,
           height: stream.height,
           durationSec: h.duration || 5,
-          titleOrTags: `${query} ${h.tags || ''}`,
+          titleOrTags: h.tags || '',
           authorName: h.user || 'Pixabay Creator',
           licenseMetadata: { license: 'Pixabay Content License', attributionRequired: false },
         };
@@ -273,7 +311,7 @@ async function searchPixabay(
         width: h.imageWidth,
         height: h.imageHeight,
         durationSec: 0,
-        titleOrTags: `${query} ${h.tags || ''}`,
+        titleOrTags: h.tags || '',
         authorName: h.user || 'Pixabay Contributor',
         licenseMetadata: { license: 'Pixabay Content License', attributionRequired: false },
       }));
@@ -325,7 +363,7 @@ async function searchWikimediaCommonsImages(query: string): Promise<MediaCandida
         width: info.width,
         height: info.height,
         durationSec: 0,
-        titleOrTags: `${query} ${p.title}`,
+        titleOrTags: p.title.replace(/^File:/i, '').replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' '),
         authorName: (info.extmetadata?.Artist?.value || 'Wikimedia Contributor').replace(/<[^>]+>/g, '').slice(0, 120),
         licenseMetadata: {
           license: info.extmetadata?.LicenseShortName?.value || 'Wikimedia Commons',
@@ -369,8 +407,9 @@ export async function findBestMediaForScene(
       .filter((c) => c.relevanceScore >= 0.35)
       .sort((a, b) => b.relevanceScore - a.relevanceScore);
 
-  // Pass 1: Stock video search across keywords and providers
-  for (const kw of keywords) {
+  // Pass 1: Stock video search across keywords and providers — compare across keywords to pick highest relevance
+  const allVideoCandidates: ScoredMediaCandidate[] = [];
+  for (const kw of keywords.slice(0, 3)) {
     const batch: MediaCandidate[] = [];
     if (pexelsCred) {
       batch.push(...(await searchPexels(pexelsCred.apiKey, kw, 'video', input.format)));
@@ -379,13 +418,19 @@ export async function findBestMediaForScene(
       batch.push(...(await searchPixabay(pixabayCred.apiKey, kw, 'video')));
     }
     const ranked = evaluate(batch, false);
-    if (ranked.length > 0 && ranked[0].relevanceScore >= 0.48) {
+    if (ranked.length > 0 && ranked[0].relevanceScore >= 0.72 && ranked[0].durationSec >= 2.5) {
       return ranked[0];
     }
+    allVideoCandidates.push(...ranked);
+  }
+  allVideoCandidates.sort((a, b) => b.relevanceScore - a.relevanceScore);
+  if (allVideoCandidates.length > 0 && allVideoCandidates[0].relevanceScore >= 0.42) {
+    return allVideoCandidates[0];
   }
 
-  // Pass 2: Stock image fallback (will be animated with Ken Burns zoom/pan in FFmpeg)
-  for (const kw of keywords) {
+  // Pass 2: Stock image fallback (animated smoothly with Ken Burns zoom in FFmpeg)
+  const allImageCandidates: ScoredMediaCandidate[] = [];
+  for (const kw of keywords.slice(0, 3)) {
     const batch: MediaCandidate[] = [];
     if (pexelsCred) {
       batch.push(...(await searchPexels(pexelsCred.apiKey, kw, 'image', input.format)));
@@ -394,12 +439,22 @@ export async function findBestMediaForScene(
       batch.push(...(await searchPixabay(pixabayCred.apiKey, kw, 'image')));
     }
     const ranked = evaluate(batch, true);
-    if (ranked.length > 0) {
+    if (ranked.length > 0 && ranked[0].relevanceScore >= 0.68) {
       return ranked[0];
     }
+    allImageCandidates.push(...ranked);
+  }
+  allImageCandidates.sort((a, b) => b.relevanceScore - a.relevanceScore);
+  if (allImageCandidates.length > 0) {
+    return allImageCandidates[0];
   }
 
-  // Pass 3: Wikimedia Commons open-license image fallback
+  // Pass 3: If we had any video candidate above 0.35, prefer it over Wikimedia stills
+  if (allVideoCandidates.length > 0) {
+    return allVideoCandidates[0];
+  }
+
+  // Pass 4: Wikimedia Commons open-license image fallback
   for (const kw of keywords.slice(0, 2)) {
     const wikiBatch = await searchWikimediaCommonsImages(kw);
     const ranked = evaluate(wikiBatch, true);

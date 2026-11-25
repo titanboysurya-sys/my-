@@ -16,6 +16,104 @@ const execFileAsync = promisify(execFile);
 
 export type VoiceProviderName = 'gemini_tts' | 'elevenlabs';
 
+export interface StudioVoiceProfile {
+  id: string;
+  label: string;
+  gender: 'male' | 'female';
+  style: string;
+  geminiVoiceName: string;
+  elevenLabsVoiceId: string;
+}
+
+/**
+ * Curated multi-gender studio voice catalog mapped to real Gemini TTS prebuilt voices
+ * and distinct ElevenLabs premade voice IDs so user voice choice works across both providers.
+ */
+export const STUDIO_VOICE_CATALOG: StudioVoiceProfile[] = [
+  {
+    id: 'Charon',
+    label: 'Charon (Male • Deep Documentary)',
+    gender: 'male',
+    style: 'deep authoritative documentary narration',
+    geminiVoiceName: 'Charon',
+    elevenLabsVoiceId: 'pNInz6obpgDQGcFmaJgB', // Adam (Deep Male)
+  },
+  {
+    id: 'Fenrir',
+    label: 'Fenrir (Male • Bold Viral Energy)',
+    gender: 'male',
+    style: 'energetic punchy high-retention storytelling',
+    geminiVoiceName: 'Fenrir',
+    elevenLabsVoiceId: 'TxGEqnHWrfWFTfGW9XjX', // Josh (Energetic Male)
+  },
+  {
+    id: 'Puck',
+    label: 'Puck (Male • Friendly & Upbeat)',
+    gender: 'male',
+    style: 'friendly upbeat conversational storytelling',
+    geminiVoiceName: 'Puck',
+    elevenLabsVoiceId: 'ErXwobaYiN019PkySvjV', // Antoni (Warm Male)
+  },
+  {
+    id: 'Orus',
+    label: 'Orus (Male • Crisp News Anchor)',
+    gender: 'male',
+    style: 'clear confident broadcast anchor delivery',
+    geminiVoiceName: 'Orus',
+    elevenLabsVoiceId: 'VR6AewLTigWG4xSOukaG', // Arnold (Crisp Male)
+  },
+  {
+    id: 'Kore',
+    label: 'Kore (Female • Clear & Firm)',
+    gender: 'female',
+    style: 'clear confident studio narration',
+    geminiVoiceName: 'Kore',
+    elevenLabsVoiceId: '21m00Tcm4TlvDq8ikWAM', // Rachel (Clear Female)
+  },
+  {
+    id: 'Aoede',
+    label: 'Aoede (Female • Warm Storyteller)',
+    gender: 'female',
+    style: 'warm expressive natural storytelling',
+    geminiVoiceName: 'Aoede',
+    elevenLabsVoiceId: 'EXAVITQu4vr4xnSDxMaL', // Bella (Warm Female)
+  },
+  {
+    id: 'Leda',
+    label: 'Leda (Female • Youthful Shorts)',
+    gender: 'female',
+    style: 'youthful lively engaging delivery',
+    geminiVoiceName: 'Leda',
+    elevenLabsVoiceId: 'MF3mGyEYCl7XYWbV9V6O', // Elli (Youthful Female)
+  },
+  {
+    id: 'Zephyr',
+    label: 'Zephyr (Female • Bright & Smooth)',
+    gender: 'female',
+    style: 'bright modern explainer delivery',
+    geminiVoiceName: 'Zephyr',
+    elevenLabsVoiceId: 'AZnzlk1XvdvUeBnXmlld', // Domi (Bright Female)
+  },
+];
+
+const VOICE_BY_ID = new Map(
+  STUDIO_VOICE_CATALOG.map((v) => [v.id.toLowerCase(), v])
+);
+
+export function resolveStudioVoiceProfile(voiceId?: string): StudioVoiceProfile {
+  const raw = (voiceId || 'Charon').trim();
+  const matched = VOICE_BY_ID.get(raw.toLowerCase());
+  if (matched) return matched;
+  if (/^[A-Za-z0-9]{15,64}$/.test(raw)) {
+    return {
+      ...STUDIO_VOICE_CATALOG[0],
+      id: raw,
+      elevenLabsVoiceId: raw,
+    };
+  }
+  return STUDIO_VOICE_CATALOG[0];
+}
+
 export interface VoiceSynthesisRequest {
   userId: string;
   projectId: string;
@@ -94,10 +192,11 @@ async function generateWithElevenLabs(
     throw new Error('ElevenLabs API key not configured.');
   }
 
-  // Default to Rachel voice ID if a non-ElevenLabs voice name was passed
+  const profile = resolveStudioVoiceProfile(req.voiceId);
+  // Accept a raw custom ElevenLabs 15+ char Voice ID if supplied; otherwise map from selected studio voice profile
   const voiceId = /^[A-Za-z0-9]{15,}$/.test(req.voiceId)
     ? req.voiceId
-    : '21m00Tcm4TlvDq8ikWAM';
+    : profile.elevenLabsVoiceId;
 
   const res = await fetch(
     `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}`,
@@ -138,8 +237,9 @@ async function generateWithGeminiTts(
     throw new Error('Gemini API key not configured.');
   }
 
-  const validGeminiVoices = new Set(['Kore', 'Puck', 'Charon', 'Fenrir', 'Aoede', 'Zephyr']);
-  const voiceName = validGeminiVoices.has(req.voiceId) ? req.voiceId : 'Kore';
+  const profile = resolveStudioVoiceProfile(req.voiceId);
+  const voiceName = profile.geminiVoiceName;
+  const speedClamped = Math.max(0.75, Math.min(1.4, Number(req.speed || 1.0)));
 
   const langMeta = resolveLanguageMeta(req.language);
   const requestBody = JSON.stringify({
@@ -147,7 +247,7 @@ async function generateWithGeminiTts(
       {
         parts: [
           {
-            text: `Read the following narration aloud naturally in ${langMeta.ttsName} with authentic native pronunciation and clear expressive pacing (${req.speed}x speed). Speak ONLY the script text below without adding any extra words:\n\n${req.text}`,
+            text: `Read the following narration aloud naturally in ${langMeta.ttsName} using ${profile.style} with authentic native pronunciation and ${speedClamped}x pacing. Speak ONLY the script text below without adding any extra words:\n\n${req.text}`,
           },
         ],
       },

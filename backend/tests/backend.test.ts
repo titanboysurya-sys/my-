@@ -23,11 +23,16 @@ import {
   rankGroqChatModels,
 } from '../src/services/modelResolver.js';
 import { scoreMediaCandidate, type MediaCandidate } from '../src/services/mediaSearchService.js';
-import { wrapPcm16AsWav } from '../src/services/voiceService.js';
+import {
+  resolveStudioVoiceProfile,
+  STUDIO_VOICE_CATALOG,
+  wrapPcm16AsWav,
+} from '../src/services/voiceService.js';
 import {
   buildSynchronizedAss,
   buildSynchronizedSrt,
   calibrateClipDurations,
+  normalizeSubtitlePreset,
   resolveOutputDimensions,
 } from '../src/services/ffmpegRenderer.js';
 import {
@@ -262,7 +267,7 @@ test('Word-calibrated scene timing and ASS subtitles lock voiceover sync and bot
   });
   assert.ok(ass.includes('PlayResX: 720'));
   assert.ok(ass.includes('PlayResY: 1280'));
-  assert.ok(ass.includes(',2,58,58,179,1')); // bottom-center alignment=2, MarginV=179 (~14% of 1280)
+  assert.ok(ass.includes(',2,54,54,205,1')); // bottom-center alignment=2, MarginV=205 (16% of 1280, Shorts UI safe)
   assert.ok(ass.includes('Dialogue: 0,0:00:00.00,'));
 });
 
@@ -362,6 +367,101 @@ test('Live model resolver skips retired/non-chat models and automatically adopts
   assert.equal(isModelRetiredOrUnsupportedError(404, 'Model not found'), true);
   assert.equal(isModelRetiredOrUnsupportedError(429, 'Rate limit exceeded'), false);
 });
+
+test('Studio voice catalog exposes male and female voices mapped to both Gemini TTS and ElevenLabs', () => {
+  const males = STUDIO_VOICE_CATALOG.filter((v) => v.gender === 'male');
+  const females = STUDIO_VOICE_CATALOG.filter((v) => v.gender === 'female');
+  assert.ok(males.length >= 4);
+  assert.ok(females.length >= 4);
+
+  const charon = resolveStudioVoiceProfile('Charon');
+  assert.equal(charon.gender, 'male');
+  assert.equal(charon.geminiVoiceName, 'Charon');
+  assert.ok(charon.elevenLabsVoiceId.length >= 15);
+
+  const kore = resolveStudioVoiceProfile('kore');
+  assert.equal(kore.gender, 'female');
+  assert.notEqual(kore.elevenLabsVoiceId, charon.elevenLabsVoiceId);
+
+  // Custom raw ElevenLabs voice IDs are preserved verbatim
+  const custom = resolveStudioVoiceProfile('CustomVoiceId123456789');
+  assert.equal(custom.elevenLabsVoiceId, 'CustomVoiceId123456789');
+});
+
+test('Colorful viral subtitle presets emit word-by-word ASS color pop and preserve Devanagari Hindi text', () => {
+  assert.equal(normalizeSubtitlePreset('mrbeast'), 'mrbeast');
+  assert.equal(normalizeSubtitlePreset('hormozi'), 'hormozi');
+  assert.equal(normalizeSubtitlePreset('bold_shorts'), 'mrbeast');
+
+  const mrbeastAss = buildSynchronizedAss(
+    [
+      {
+        sceneNumber: 1,
+        localMediaPath: '/tmp/1.mp4',
+        mediaType: 'video',
+        durationSec: 4,
+        subtitleText: 'This ancient secret changed history forever',
+        transition: 'fade',
+      },
+    ],
+    1080,
+    1920,
+    {
+      enabled: true,
+      burnIn: true,
+      preset: 'mrbeast',
+      fontSize: 44,
+      primaryColor: '#FFFFFF',
+      outlineColor: '#000000',
+      position: 'bottom_safe',
+    }
+  );
+  // Active word highlight color tag & pop scaling should be present
+  assert.ok(mrbeastAss.includes('{\\c&H'));
+  assert.ok(mrbeastAss.includes('\\fscx11'));
+  assert.ok(mrbeastAss.includes('ANCIENT'));
+
+  const hormoziHindiAss = buildSynchronizedAss(
+    [
+      {
+        sceneNumber: 1,
+        localMediaPath: '/tmp/2.mp4',
+        mediaType: 'video',
+        durationSec: 4,
+        subtitleText: 'यह अद्भुत इतिहास आज भी दुनिया को हैरान करता है',
+        transition: 'fade',
+      },
+    ],
+    1080,
+    1920,
+    {
+      enabled: true,
+      burnIn: true,
+      preset: 'hormozi',
+      fontSize: 44,
+      primaryColor: '#FFFFFF',
+      outlineColor: '#000000',
+      position: 'center',
+    }
+  );
+  assert.ok(hormoziHindiAss.includes('इतिहास'));
+  assert.ok(hormoziHindiAss.includes('{\\c&H'));
+});
+
+test('User custom open-source media URL guard allows public HTTPS links and blocks private/local/HTTP URLs', () => {
+  assert.doesNotThrow(() =>
+    assertSafeExternalUrl('https://commons.wikimedia.org/wiki/File:Taj_Mahal.jpg', 'user_media')
+  );
+  assert.doesNotThrow(() =>
+    assertSafeExternalUrl('https://archive.org/details/apollo11_launch', 'user_media')
+  );
+  assert.throws(() => assertSafeExternalUrl('http://commons.wikimedia.org/wiki/File:Test.jpg', 'user_media'));
+  assert.throws(() => assertSafeExternalUrl('https://localhost:3000/secret.mp4', 'user_media'));
+  assert.throws(() => assertSafeExternalUrl('https://10.0.0.5/internal.jpg', 'user_media'));
+  assert.throws(() => assertSafeExternalUrl('https://169.254.169.254/latest/meta-data', 'user_media'));
+  assert.throws(() => assertSafeExternalUrl('https://user:pass@example.com/clip.mp4', 'user_media'));
+});
+
 
 
 

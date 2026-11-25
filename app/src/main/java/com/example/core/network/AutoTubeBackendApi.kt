@@ -71,6 +71,24 @@ interface AutoTubeBackendApi {
         @Body request: RegenerateScriptRequest
     ): ScriptSingleResponse
 
+    @PUT("api/projects/{id}/settings")
+    suspend fun updateProjectSettings(
+        @Path("id") id: String,
+        @Body request: UpdateProjectSettingsRequest
+    ): ProjectSingleResponse
+
+    @POST("api/projects/{id}/rerender")
+    suspend fun rerenderProject(
+        @Path("id") id: String,
+        @Body request: RerenderProjectRequest
+    ): JobSingleResponse
+
+    @POST("api/projects/{id}/publish")
+    suspend fun publishProject(
+        @Path("id") id: String,
+        @Body request: PublishProjectRequest
+    ): JobSingleResponse
+
     @DELETE("api/projects/{id}")
     suspend fun deleteProject(@Path("id") id: String): SimpleStatusResponse
 

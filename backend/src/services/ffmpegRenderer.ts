@@ -15,11 +15,20 @@ export interface TimelineSceneClip {
   transition: string;
 }
 
+export type SubtitlePresetId =
+  | 'mrbeast'
+  | 'hormozi'
+  | 'neon_glow'
+  | 'cinematic_gold'
+  | 'classic';
+
 export interface SubtitleStyleConfig {
   enabled: boolean;
   burnIn: boolean;
+  preset?: SubtitlePresetId;
   fontSize: number;
   primaryColor: string;
+  highlightColor?: string;
   outlineColor: string;
   position: 'bottom_safe' | 'center' | 'top_safe';
 }
@@ -133,10 +142,149 @@ export function buildSynchronizedSrt(clips: TimelineSceneClip[]): string {
   return entries.join('\n');
 }
 
+export function normalizeSubtitlePreset(raw?: string | null): SubtitlePresetId {
+  switch ((raw || '').trim().toLowerCase()) {
+    case 'mrbeast':
+    case 'bold_shorts':
+      return 'mrbeast';
+    case 'hormozi':
+      return 'hormozi';
+    case 'neon_glow':
+    case 'neon':
+      return 'neon_glow';
+    case 'cinematic_gold':
+    case 'gold':
+      return 'cinematic_gold';
+    case 'classic':
+    case 'classic_clean':
+    case 'minimal':
+      return 'classic';
+    default:
+      return 'mrbeast';
+  }
+}
+
+interface ResolvedAssPreset {
+  preset: SubtitlePresetId;
+  primaryHex: string;
+  highlightColorsHex: string[];
+  outlineHex: string;
+  backAss: string;
+  borderStyle: 1 | 3;
+  fontMultiplier: number;
+  outlineMultiplier: number;
+  shadowMultiplier: number;
+  uppercaseLatin: boolean;
+  wordPopScale: number;
+  maxWordsVertical: number;
+  maxWordsHorizontal: number;
+  dynamicWordHighlight: boolean;
+}
+
+function resolveAssPreset(style: SubtitleStyleConfig): ResolvedAssPreset {
+  const preset = normalizeSubtitlePreset(style.preset);
+  switch (preset) {
+    case 'mrbeast':
+      return {
+        preset,
+        primaryHex: '#FFFFFF',
+        highlightColorsHex: ['#FFE600', '#FF5500'],
+        outlineHex: '#000000',
+        backAss: '&H90000000',
+        borderStyle: 1,
+        fontMultiplier: 1.18,
+        outlineMultiplier: 0.125,
+        shadowMultiplier: 0.08,
+        uppercaseLatin: true,
+        wordPopScale: 112,
+        maxWordsVertical: 3,
+        maxWordsHorizontal: 4,
+        dynamicWordHighlight: true,
+      };
+    case 'hormozi':
+      return {
+        preset,
+        primaryHex: '#FFFFFF',
+        highlightColorsHex: ['#39FF14', '#FFD700', '#00E5FF'],
+        outlineHex: '#0A0A0A',
+        backAss: '&HA0000000',
+        borderStyle: 1,
+        fontMultiplier: 1.15,
+        outlineMultiplier: 0.115,
+        shadowMultiplier: 0.075,
+        uppercaseLatin: true,
+        wordPopScale: 110,
+        maxWordsVertical: 3,
+        maxWordsHorizontal: 4,
+        dynamicWordHighlight: true,
+      };
+    case 'neon_glow':
+      return {
+        preset,
+        primaryHex: '#F8FAFC',
+        highlightColorsHex: ['#00F0FF', '#FF2E97'],
+        outlineHex: '#0D0B26',
+        backAss: '&H88140C2E',
+        borderStyle: 1,
+        fontMultiplier: 1.1,
+        outlineMultiplier: 0.11,
+        shadowMultiplier: 0.09,
+        uppercaseLatin: true,
+        wordPopScale: 108,
+        maxWordsVertical: 3,
+        maxWordsHorizontal: 5,
+        dynamicWordHighlight: true,
+      };
+    case 'cinematic_gold':
+      return {
+        preset,
+        primaryHex: '#FFF8E7',
+        highlightColorsHex: ['#FFB703'],
+        outlineHex: '#000000',
+        backAss: '&H99090D14',
+        borderStyle: 3,
+        fontMultiplier: 1.0,
+        outlineMultiplier: 0.08,
+        shadowMultiplier: 0.0,
+        uppercaseLatin: false,
+        wordPopScale: 104,
+        maxWordsVertical: 4,
+        maxWordsHorizontal: 6,
+        dynamicWordHighlight: true,
+      };
+    case 'classic':
+    default:
+      return {
+        preset: 'classic',
+        primaryHex: style.primaryColor || '#FFFFFF',
+        highlightColorsHex: [style.highlightColor || '#FFD43B'],
+        outlineHex: style.outlineColor || '#000000',
+        backAss: '&H78000000',
+        borderStyle: 1,
+        fontMultiplier: 1.0,
+        outlineMultiplier: 0.085,
+        shadowMultiplier: 0.04,
+        uppercaseLatin: false,
+        wordPopScale: 100,
+        maxWordsVertical: 4,
+        maxWordsHorizontal: 6,
+        dynamicWordHighlight: false,
+      };
+  }
+}
+
+function sanitizeAssWord(word: string, uppercaseLatin: boolean): string {
+  const cleaned = word.replace(/\\/g, '').replace(/[{}]/g, '').replace(/\r?\n/g, ' ').trim();
+  if (!cleaned) return '';
+  // Preserve Devanagari/non-Latin scripts untouched while uppercasing Latin/Hinglish punch words
+  const hasNonLatin = /[^\x00-\x7F]/.test(cleaned);
+  return uppercaseLatin && !hasNonLatin ? cleaned.toUpperCase() : cleaned;
+}
+
 /**
  * Generates an Advanced SubStation Alpha (.ass) subtitle file with explicit PlayResX/PlayResY
- * matching the output video dimensions. This eliminates libass's default 288px scaling bug that
- * caused subtitles to float near the top of 9:16 Shorts.
+ * matching the output video dimensions and viral word-by-word color highlighting
+ * (MrBeast, Hormozi, Neon Cyber, Cinematic Gold, Classic Clean).
  */
 export function buildSynchronizedAss(
   clips: TimelineSceneClip[],
@@ -146,6 +294,7 @@ export function buildSynchronizedAss(
 ): string {
   const isVertical = height > width;
   const isSquare = Math.abs(height - width) < 40;
+  const resolved = resolveAssPreset(style);
 
   // Responsive readable font size scaled directly to actual video resolution
   const baseFontSize = isVertical
@@ -154,30 +303,34 @@ export function buildSynchronizedAss(
       ? Math.round(width * 0.052)
       : Math.round(height * 0.056);
   const scaleFactor = Math.max(0.75, Math.min(1.25, (style.fontSize || 44) / 44));
-  const fontSize = Math.max(24, Math.min(82, Math.round(baseFontSize * scaleFactor)));
+  const fontSize = Math.max(
+    26,
+    Math.min(92, Math.round(baseFontSize * scaleFactor * resolved.fontMultiplier))
+  );
 
   const alignment =
     style.position === 'center' ? 5 : style.position === 'top_safe' ? 8 : 2;
 
-  // Bottom-safe lower-third positioning: 14% from bottom on 9:16 (clears YouTube Shorts UI), 8% on 16:9
+  // Bottom-safe lower-third positioning: 16% from bottom on 9:16 (clears YouTube Shorts UI), 8% on 16:9
   const marginV =
     style.position === 'center'
       ? 0
       : style.position === 'top_safe'
         ? Math.round(height * 0.12)
         : isVertical
-          ? Math.round(height * 0.14)
+          ? Math.round(height * 0.16)
           : isSquare
             ? Math.round(height * 0.1)
             : Math.round(height * 0.08);
 
-  const marginH = Math.round(width * 0.08);
-  const outlinePx = Math.max(2, Math.round(fontSize * 0.085));
-  const shadowPx = Math.max(1, Math.round(fontSize * 0.04));
+  const marginH = Math.round(width * 0.075);
+  const outlinePx = Math.max(2, Math.round(fontSize * resolved.outlineMultiplier));
+  const shadowPx =
+    resolved.shadowMultiplier > 0 ? Math.max(1, Math.round(fontSize * resolved.shadowMultiplier)) : 0;
 
-  const primaryAss = hexToAssColor(style.primaryColor || '#FFFFFF', '00');
-  const outlineAss = hexToAssColor(style.outlineColor || '#000000', '00');
-  const backAss = '&H78000000';
+  const primaryAss = hexToAssColor(resolved.primaryHex, '00');
+  const outlineAss = hexToAssColor(resolved.outlineHex, '00');
+  const highlightAssList = resolved.highlightColorsHex.map((hex) => hexToAssColor(hex, '00'));
 
   const header = [
     '[Script Info]',
@@ -189,15 +342,16 @@ export function buildSynchronizedAss(
     '',
     '[V4+ Styles]',
     'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
-    `Style: Default,Noto Sans,${fontSize},${primaryAss},&H0000FFFF,${outlineAss},${backAss},-1,0,0,0,100,100,0,0,1,${outlinePx},${shadowPx},${alignment},${marginH},${marginH},${marginV},1`,
+    `Style: Default,Noto Sans,${fontSize},${primaryAss},${highlightAssList[0]},${outlineAss},${resolved.backAss},-1,0,0,0,100,100,0,0,${resolved.borderStyle},${outlinePx},${shadowPx},${alignment},${marginH},${marginH},${marginV},1`,
     '',
     '[Events]',
     'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text',
   ];
 
-  const maxWords = isVertical ? 4 : 6;
+  const maxWords = isVertical ? resolved.maxWordsVertical : resolved.maxWordsHorizontal;
   const dialogueLines: string[] = [];
   let cursorSec = 0;
+  let globalWordIdx = 0;
 
   for (const clip of clips) {
     const chunks = splitCaptionChunks(clip.subtitleText, maxWords);
@@ -209,15 +363,57 @@ export function buildSynchronizedAss(
     const totalChars = chunks.reduce((acc, c) => acc + Math.max(1, c.length), 0);
     for (const chunk of chunks) {
       const sliceSec = (Math.max(1, chunk.length) / totalChars) * clip.durationSec;
-      const start = cursorSec;
-      const end = cursorSec + Math.max(0.32, sliceSec - 0.03);
-      const safeText = chunk
-        .replace(/\\/g, '')
-        .replace(/[{}]/g, '')
-        .replace(/\r?\n/g, '\\N');
-      dialogueLines.push(
-        `Dialogue: 0,${formatAssTime(start)},${formatAssTime(end)},Default,,0,0,0,,${safeText}`
-      );
+      const chunkWords = chunk
+        .split(/\s+/)
+        .map((w) => sanitizeAssWord(w, resolved.uppercaseLatin))
+        .filter(Boolean);
+
+      if (chunkWords.length === 0) {
+        cursorSec += sliceSec;
+        continue;
+      }
+
+      if (!resolved.dynamicWordHighlight || chunkWords.length === 1) {
+        const start = cursorSec;
+        const end = cursorSec + Math.max(0.28, sliceSec - 0.02);
+        const textOut =
+          resolved.dynamicWordHighlight && chunkWords.length === 1
+            ? `{\\c${highlightAssList[globalWordIdx % highlightAssList.length]}&\\fscx${resolved.wordPopScale}\\fscy${resolved.wordPopScale}}${chunkWords[0]}{\\r}`
+            : chunkWords.join(' ');
+        dialogueLines.push(
+          `Dialogue: 0,${formatAssTime(start)},${formatAssTime(end)},Default,,0,0,0,,${textOut}`
+        );
+        globalWordIdx += chunkWords.length;
+        cursorSec += sliceSec;
+        continue;
+      }
+
+      // Word-by-word active color highlight (MrBeast / Hormozi / Neon / Gold)
+      const wordCharTotal = chunkWords.reduce((acc, w) => acc + Math.max(2, w.length), 0);
+      let wordCursor = cursorSec;
+      const chunkEnd = cursorSec + sliceSec;
+
+      for (let wi = 0; wi < chunkWords.length; wi++) {
+        const wordDur = (Math.max(2, chunkWords[wi].length) / wordCharTotal) * sliceSec;
+        const wStart = wordCursor;
+        const wEnd = wi === chunkWords.length - 1 ? Math.max(wStart + 0.14, chunkEnd - 0.02) : wordCursor + wordDur;
+        const hlColor = highlightAssList[(globalWordIdx + wi) % highlightAssList.length];
+        const popTag =
+          resolved.wordPopScale > 100
+            ? `\\fscx${resolved.wordPopScale}\\fscy${resolved.wordPopScale}`
+            : '';
+
+        const renderedLine = chunkWords
+          .map((w, idx) => (idx === wi ? `{\\c${hlColor}&${popTag}}${w}{\\r}` : w))
+          .join(' ');
+
+        dialogueLines.push(
+          `Dialogue: 0,${formatAssTime(wStart)},${formatAssTime(wEnd)},Default,,0,0,0,,${renderedLine}`
+        );
+        wordCursor += wordDur;
+      }
+
+      globalWordIdx += chunkWords.length;
       cursorSec += sliceSec;
     }
   }

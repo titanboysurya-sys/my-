@@ -15,9 +15,12 @@ import com.example.core.network.CreateProjectRequest
 import com.example.core.network.DashboardStatsDto
 import com.example.core.network.HealthResponse
 import com.example.core.network.ProjectDetailResponse
+import com.example.core.network.PublishProjectRequest
+import com.example.core.network.RerenderProjectRequest
 import com.example.core.network.ScheduleDto
 import com.example.core.network.TopicResearchRequest
 import com.example.core.network.TopicSuggestionDto
+import com.example.core.network.UpdateProjectSettingsRequest
 import com.example.core.network.UpdateScheduleRequest
 import com.example.core.security.AuthSession
 import com.example.data.StudioRepository
@@ -504,6 +507,66 @@ class StudioViewModel(
         }
     }
 
+    fun saveProjectSettingsAndRerender(
+        projectId: String,
+        settingsRequest: UpdateProjectSettingsRequest,
+        rerenderRequest: RerenderProjectRequest?
+    ) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true) }
+            val saveRes = repository.updateProjectSettings(projectId, settingsRequest)
+            saveRes.onFailure { err ->
+                _uiState.update { it.copy(isLoading = false) }
+                showError(err.message ?: "Failed to save project settings")
+                return@launch
+            }
+            if (rerenderRequest != null) {
+                repository.rerenderProject(projectId, rerenderRequest)
+                    .onSuccess { job ->
+                        _uiState.update {
+                            it.copy(isLoading = false, lastCreatedJobId = job.id)
+                        }
+                        showInfo("Saved changes — re-rendering video with your updated voice, subtitles & media!")
+                        loadProjectDetail(projectId)
+                        refreshProjects()
+                        refreshJobs()
+                    }
+                    .onFailure { err ->
+                        _uiState.update { it.copy(isLoading = false) }
+                        showError(err.message ?: "Settings saved, but re-render failed to queue")
+                    }
+            } else {
+                _uiState.update { it.copy(isLoading = false) }
+                showInfo("Project settings & media links saved")
+                loadProjectDetail(projectId)
+                refreshProjects()
+            }
+        }
+    }
+
+    fun publishProjectToYouTube(
+        projectId: String,
+        request: PublishProjectRequest
+    ) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true) }
+            repository.publishProject(projectId, request)
+                .onSuccess { job ->
+                    _uiState.update {
+                        it.copy(isLoading = false, lastCreatedJobId = job.id)
+                    }
+                    showInfo("Approved! Uploading rendered MP4 directly to YouTube...")
+                    loadProjectDetail(projectId)
+                    refreshProjects()
+                    refreshJobs()
+                }
+                .onFailure { err ->
+                    _uiState.update { it.copy(isLoading = false) }
+                    showError(err.message ?: "Could not start YouTube upload")
+                }
+        }
+    }
+
     fun deleteProject(projectId: String) {
         viewModelScope.launch {
             repository.deleteProject(projectId)
@@ -612,6 +675,10 @@ class StudioViewModel(
 
     fun reportExternalError(message: String) {
         showError(message)
+    }
+
+    fun reportExternalInfo(message: String) {
+        showInfo(message)
     }
 
     fun refreshYouTubeAccounts(showFeedback: Boolean = false) {

@@ -52,6 +52,8 @@ import com.example.core.database.CachedYouTubeChannelEntity
 import com.example.core.network.CreateProjectRequest
 import com.example.core.network.UpdateScheduleRequest
 import com.example.ui.components.COMMON_TIMEZONES
+import com.example.ui.components.STUDIO_SUBTITLE_PRESETS
+import com.example.ui.components.STUDIO_VOICE_OPTIONS
 import com.example.ui.components.StatusPill
 import com.example.ui.components.StudioSectionHeader
 import com.example.ui.components.StudioTimePickerDialog
@@ -79,6 +81,8 @@ private data class ChannelAutopilotProfile(
     val daysOfWeek: Set<String>,
     val timezone: String,
     val voiceProvider: String,
+    val voiceId: String = "Charon",
+    val subtitleStyle: String = "mrbeast",
     val autoPublish: Boolean,
     val uploadPrivacy: String,
     val preferredTopics: String,
@@ -118,6 +122,8 @@ private fun parseChannelSchedules(
             daysOfWeek = days,
             timezone = m["timezone"]?.toString()?.ifBlank { TimeZone.getDefault().id } ?: TimeZone.getDefault().id,
             voiceProvider = m["voiceProvider"]?.toString() ?: "gemini_tts",
+            voiceId = m["voiceId"]?.toString()?.ifBlank { "Charon" } ?: "Charon",
+            subtitleStyle = m["subtitleStyle"]?.toString()?.ifBlank { "mrbeast" } ?: "mrbeast",
             autoPublish = m["autoPublish"] as? Boolean ?: true,
             uploadPrivacy = m["uploadPrivacy"]?.toString() ?: "private",
             preferredTopics = (m["preferredTopics"] as? List<*>)?.joinToString(", ") ?: "",
@@ -142,6 +148,8 @@ private fun ChannelAutopilotProfile.toWireMap(): Map<String, Any> = mapOf(
     "daysOfWeek" to daysOfWeek.toList(),
     "timezone" to timezone,
     "voiceProvider" to voiceProvider,
+    "voiceId" to voiceId,
+    "subtitleStyle" to subtitleStyle,
     "autoPublish" to autoPublish,
     "uploadPrivacy" to uploadPrivacy,
     "preferredTopics" to preferredTopics.split(",").map { it.trim() }.filter { it.isNotBlank() },
@@ -232,8 +240,25 @@ fun AutomationScreen(
                 ?: "gemini_tts"
         )
     }
-    var subtitleStyle by remember(existing) {
-        mutableStateOf(existingPrefs["subtitle_style"]?.toString() ?: "bold_shorts")
+    var voiceId by remember(existing, selectedChannelId) {
+        mutableStateOf(
+            activeSavedChannel?.voiceId
+                ?: existingPrefs["voice_id"]?.toString()
+                ?: "Charon"
+        )
+    }
+    var subtitleStyle by remember(existing, selectedChannelId) {
+        mutableStateOf(
+            activeSavedChannel?.subtitleStyle
+                ?: existingPrefs["subtitle_style"]?.toString()?.let { raw ->
+                    when (raw.lowercase()) {
+                        "bold_shorts" -> "mrbeast"
+                        "classic_clean", "minimal" -> "classic"
+                        else -> raw
+                    }
+                }
+                ?: "mrbeast"
+        )
     }
     var uploadPrivacy by remember(existing, selectedChannelId) {
         mutableStateOf(
@@ -372,7 +397,10 @@ fun AutomationScreen(
                                     durationSeconds = durationSeconds,
                                     autoProduce = true,
                                     voiceProvider = voiceProvider,
+                                    voiceId = voiceId,
+                                    subtitlePreset = subtitleStyle,
                                     autoUpload = autoPublish,
+                                    reviewBeforeUpload = !autoPublish,
                                     privacyStatus = uploadPrivacy,
                                     youtubeAccountId = if (autoPublish) selectedChannelId else null,
                                     startImmediately = true
@@ -710,12 +738,30 @@ fun AutomationScreen(
                         )
                     }
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        listOf("bold_shorts" to "Bold Shorts", "classic_clean" to "Classic Clean", "minimal" to "Minimal").forEach { (id, label) ->
+                    Text("Voice Artist (Male & Female)", style = MaterialTheme.typography.titleSmall)
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        STUDIO_VOICE_OPTIONS.forEach { v ->
                             FilterChip(
-                                selected = subtitleStyle == id,
-                                onClick = { subtitleStyle = id },
-                                label = { Text(label) }
+                                selected = voiceId.equals(v.id, ignoreCase = true),
+                                onClick = { voiceId = v.id },
+                                label = { Text("${v.displayName} (${v.badge})") }
+                            )
+                        }
+                    }
+
+                    Text("Colorful Subtitle Preset", style = MaterialTheme.typography.titleSmall)
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        STUDIO_SUBTITLE_PRESETS.forEach { preset ->
+                            FilterChip(
+                                selected = subtitleStyle.equals(preset.id, ignoreCase = true),
+                                onClick = { subtitleStyle = preset.id },
+                                label = { Text(preset.name) }
                             )
                         }
                     }
@@ -797,6 +843,8 @@ fun AutomationScreen(
                             daysOfWeek = selectedDays,
                             timezone = safeTz,
                             voiceProvider = voiceProvider,
+                            voiceId = voiceId,
+                            subtitleStyle = subtitleStyle,
                             autoPublish = autoPublish,
                             uploadPrivacy = uploadPrivacy,
                             preferredTopics = preferredTopics,
@@ -808,6 +856,7 @@ fun AutomationScreen(
                         "topic_preferences" to preferredTopics.split(",").map { it.trim() }.filter { it.isNotBlank() },
                         "avoided_topics" to avoidedTopics.split(",").map { it.trim() }.filter { it.isNotBlank() },
                         "voice_provider" to voiceProvider,
+                        "voice_id" to voiceId,
                         "subtitle_style" to subtitleStyle,
                         "upload_privacy" to uploadPrivacy,
                         "auto_publish" to autoPublish,

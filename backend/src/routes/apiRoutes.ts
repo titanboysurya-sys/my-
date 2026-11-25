@@ -9,6 +9,8 @@ import {
   sensitiveRateLimiter,
   type AuthenticatedRequest,
 } from '../middleware/auth.js';
+import { normalizeSubtitlePreset } from '../services/ffmpegRenderer.js';
+import { assertSafeExternalUrl } from '../security/urlGuard.js';
 import {
   createAIProviderForUser,
   generateScriptWithAI,
@@ -487,17 +489,32 @@ apiRouter.post('/projects', sensitiveRateLimiter, async (req: AuthenticatedReque
       qualityPreset: z.enum(['720p', '1080p']).default('1080p'),
       autoProduce: z.boolean().default(true),
       voiceProvider: z.enum(['gemini_tts', 'elevenlabs']).default('gemini_tts'),
-      voiceId: z.string().min(1).max(64).default('Kore'),
+      voiceId: z.string().min(1).max(64).default('Charon'),
+      voiceSpeed: z.number().min(0.7).max(1.4).default(1.0),
+      subtitlePreset: z
+        .enum(['mrbeast', 'hormozi', 'neon_glow', 'cinematic_gold', 'classic'])
+        .default('mrbeast'),
+      subtitlePosition: z.enum(['bottom_safe', 'center', 'top_safe']).default('bottom_safe'),
+      subtitlesEnabled: z.boolean().default(true),
       autoUpload: z.boolean().default(false),
+      reviewBeforeUpload: z.boolean().default(true),
       privacyStatus: z.enum(['private', 'unlisted', 'public']).default('private'),
       scheduledPublishTime: z.string().nullable().optional(),
       youtubeAccountId: z.string().uuid().nullable().optional(),
+      mediaSourceMode: z.enum(['all', 'open_source_only', 'api_only']).default('all'),
+      customMediaUrls: z.array(z.string().max(1024)).max(15).optional(),
       startImmediately: z.boolean().default(true),
     });
     const body = schema.parse(req.body);
     if (body.startImmediately) {
       await enforceUserJobQuota(userId);
     }
+
+    const validatedCustomUrls = (body.customMediaUrls || [])
+      .map((u) => u.trim())
+      .filter(Boolean)
+      .map((u) => assertSafeExternalUrl(u, 'user_media').toString());
+
     const supabase = getSupabaseAdmin();
 
     const { data: project, error } = await supabase
@@ -517,11 +534,25 @@ apiRouter.post('/projects', sensitiveRateLimiter, async (req: AuthenticatedReque
         auto_produce: body.autoProduce,
         voice_provider: body.voiceProvider,
         voice_id: body.voiceId,
+        voice_speed: body.voiceSpeed,
+        subtitle_style: {
+          enabled: body.subtitlesEnabled,
+          burn_in: true,
+          preset: normalizeSubtitlePreset(body.subtitlePreset),
+          font_size: 44,
+          primary_color: '#FFFFFF',
+          highlight_color: '#FFE600',
+          outline_color: '#000000',
+          position: body.subtitlePosition,
+        },
         upload_config: {
           auto_upload: body.autoUpload,
+          review_before_upload: body.reviewBeforeUpload,
           privacy_status: body.privacyStatus,
           scheduled_publish_time: body.scheduledPublishTime || null,
           youtube_account_id: body.youtubeAccountId || null,
+          media_source_mode: body.mediaSourceMode,
+          custom_media_urls: validatedCustomUrls,
         },
         status: 'queued',
       })
@@ -785,6 +816,348 @@ apiRouter.post('/projects/:id/script/regenerate', sensitiveRateLimiter, async (r
 
     if (error) throw new Error(error.message);
     res.json({ script });
+  } catch (err) {
+    res.status(400).json({ error: sanitizeErrorMessage(err) });
+  }
+});
+
+// Update voice, colorful subtitle style, metadata, custom open-source media links, or per-scene media
+apiRouter.put('/projects/:id/settings', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const userId = getAuthUserId(req);
+    const projectId = z.string().uuid().parse(req.params.id);
+    const body = z
+      .object({
+        title: z.string().min(1).max(120).optional(),
+        description: z.string().max(5000).optional(),
+        tags: z.array(z.string().max(60)).max(30).optional(),
+        voiceProvider: z.enum(['gemini_tts', 'elevenlabs']).optional(),
+        voiceId: z.string().min(1).max(64).optional(),
+        voiceSpeed: z.number().min(0.7).max(1.4).optional(),
+        subtitlePreset: z
+          .enum(['mrbeast', 'hormozi', 'neon_glow', 'cinematic_gold', 'classic'])
+          .optional(),
+        subtitlePosition: z.enum(['bottom_safe', 'center', 'top_safe']).optional(),
+        subtitlesEnabled: z.boolean().optional(),
+        mediaSourceMode: z.enum(['all', 'open_source_only', 'api_only']).optional(),
+        customMediaUrls: z.array(z.string().max(1024)).max(15).optional(),
+        sceneOverrides: z
+          .array(
+            z.object({
+              sceneId: z.string().uuid(),
+              primaryKeyword: z.string().min(1).max(150).optional(),
+              customMediaUrl: z.string().max(1024).nullable().optional(),
+            })
+          )
+          .max(30)
+          .optional(),
+      })
+      .parse(req.body || {});
+
+    const supabase = getSupabaseAdmin();
+    const { data: existing } = await supabase
+      .from('projects')
+      .select('*')
+      .eq('id', projectId)
+      .eq('user_id', userId)
+      .maybeSingle();
+
+    if (!existing) {
+      res.status(404).json({ error: 'Project not found' });
+      return;
+    }
+
+    const existingSub = (existing.subtitle_style || {}) as Record<string, unknown>;
+    const existingUpload = (existing.upload_config || {}) as Record<string, unknown>;
+    const existingSeo = (existing.seo_metadata || {}) as Record<string, unknown>;
+
+    const updates: Record<string, unknown> = {};
+    if (body.title !== undefined) updates.title = body.title.trim();
+    if (body.voiceProvider !== undefined) updates.voice_provider = body.voiceProvider;
+    if (body.voiceId !== undefined) updates.voice_id = body.voiceId;
+    if (body.voiceSpeed !== undefined) updates.voice_speed = body.voiceSpeed;
+
+    if (
+      body.subtitlePreset !== undefined ||
+      body.subtitlePosition !== undefined ||
+      body.subtitlesEnabled !== undefined
+    ) {
+      updates.subtitle_style = {
+        ...existingSub,
+        enabled: body.subtitlesEnabled ?? existingSub.enabled ?? true,
+        burn_in: true,
+        preset: normalizeSubtitlePreset(
+          body.subtitlePreset ?? (typeof existingSub.preset === 'string' ? existingSub.preset : 'mrbeast')
+        ),
+        position: body.subtitlePosition ?? existingSub.position ?? 'bottom_safe',
+      };
+    }
+
+    if (body.mediaSourceMode !== undefined || body.customMediaUrls !== undefined) {
+      const safeUrls =
+        body.customMediaUrls !== undefined
+          ? body.customMediaUrls
+              .map((u) => u.trim())
+              .filter(Boolean)
+              .map((u) => assertSafeExternalUrl(u, 'user_media').toString())
+          : existingUpload.custom_media_urls || [];
+      updates.upload_config = {
+        ...existingUpload,
+        media_source_mode: body.mediaSourceMode ?? existingUpload.media_source_mode ?? 'all',
+        custom_media_urls: safeUrls,
+      };
+    }
+
+    if (body.title !== undefined || body.description !== undefined || body.tags !== undefined) {
+      updates.seo_metadata = {
+        ...existingSeo,
+        title: body.title?.trim() ?? existingSeo.title ?? existing.title,
+        description: body.description ?? existingSeo.description ?? '',
+        tags: body.tags ?? existingSeo.tags ?? [],
+      };
+    }
+
+    if (Object.keys(updates).length > 0) {
+      const { error: updErr } = await supabase
+        .from('projects')
+        .update(updates)
+        .eq('id', projectId)
+        .eq('user_id', userId);
+      if (updErr) throw new Error(updErr.message);
+    }
+
+    if (body.sceneOverrides?.length) {
+      for (const ov of body.sceneOverrides) {
+        const { data: sceneRow } = await supabase
+          .from('scenes')
+          .select('id, search_keywords')
+          .eq('id', ov.sceneId)
+          .eq('project_id', projectId)
+          .eq('user_id', userId)
+          .maybeSingle();
+        if (!sceneRow) continue;
+
+        const existingKw = Array.isArray(sceneRow.search_keywords)
+          ? sceneRow.search_keywords.map((k: unknown) => String(k)).filter((k: string) => !k.startsWith('custom_url:'))
+          : [];
+        if (ov.customMediaUrl && ov.customMediaUrl.trim()) {
+          const safeSceneUrl = assertSafeExternalUrl(ov.customMediaUrl.trim(), 'user_media').toString();
+          existingKw.unshift(`custom_url:${safeSceneUrl}`);
+        }
+        const sceneUpdates: Record<string, unknown> = { search_keywords: existingKw };
+        if (ov.primaryKeyword?.trim()) {
+          sceneUpdates.primary_keyword = ov.primaryKeyword.trim();
+        }
+        await supabase
+          .from('scenes')
+          .update(sceneUpdates)
+          .eq('id', ov.sceneId)
+          .eq('user_id', userId);
+      }
+    }
+
+    const { data: updated } = await supabase
+      .from('projects')
+      .select('*')
+      .eq('id', projectId)
+      .eq('user_id', userId)
+      .single();
+
+    res.json({ project: updated });
+  } catch (err) {
+    res.status(400).json({ error: sanitizeErrorMessage(err) });
+  }
+});
+
+// Re-render video after user edits voice, subtitle style, script, or custom media links (pauses for review)
+apiRouter.post('/projects/:id/rerender', sensitiveRateLimiter, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const userId = getAuthUserId(req);
+    const projectId = z.string().uuid().parse(req.params.id);
+    const body = z
+      .object({
+        regenerateVoice: z.boolean().default(true),
+        refetchMedia: z.boolean().default(false),
+        regenerateScenes: z.boolean().default(false),
+        reviewBeforeUpload: z.boolean().default(true),
+      })
+      .parse(req.body || {});
+
+    const supabase = getSupabaseAdmin();
+    const { data: project } = await supabase
+      .from('projects')
+      .select('*')
+      .eq('id', projectId)
+      .eq('user_id', userId)
+      .maybeSingle();
+
+    if (!project) {
+      res.status(404).json({ error: 'Project not found' });
+      return;
+    }
+
+    await enforceUserJobQuota(userId);
+
+    const completedStages: string[] = ['researching', 'generating_script'];
+    if (!body.regenerateScenes) {
+      completedStages.push('generating_scenes');
+    }
+    if (!body.refetchMedia && !body.regenerateScenes) {
+      completedStages.push('searching_media', 'downloading_media');
+    } else {
+      // Clear cached media_assets so fresh open-source/custom media is fetched cleanly
+      await supabase
+        .from('media_assets')
+        .delete()
+        .eq('project_id', projectId)
+        .eq('user_id', userId);
+    }
+    if (!body.regenerateVoice && !body.regenerateScenes && project.narration_audio_path) {
+      completedStages.push('generating_voice');
+    }
+
+    const existingUpload = (project.upload_config || {}) as Record<string, unknown>;
+    await supabase
+      .from('projects')
+      .update({
+        auto_produce: true,
+        status: 'queued',
+        upload_config: {
+          ...existingUpload,
+          review_before_upload: body.reviewBeforeUpload,
+        },
+      })
+      .eq('id', projectId)
+      .eq('user_id', userId);
+
+    const { data: job, error } = await supabase
+      .from('video_jobs')
+      .insert({
+        user_id: userId,
+        project_id: projectId,
+        job_type: 'render_only',
+        status: 'queued',
+        current_stage: 'queued',
+        progress: 25,
+        completed_stages: completedStages,
+        status_message: 'Re-rendering video with your updated voice, subtitles & media',
+        idempotency_key: `rerender-${projectId}-${crypto.randomUUID()}`,
+      })
+      .select('*')
+      .single();
+
+    if (error) throw new Error(error.message);
+    res.status(201).json({ job });
+  } catch (err) {
+    res.status(400).json({ error: sanitizeErrorMessage(err) });
+  }
+});
+
+// Approve rendered video & push directly to YouTube (skips re-rendering!)
+apiRouter.post('/projects/:id/publish', sensitiveRateLimiter, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const userId = getAuthUserId(req);
+    const projectId = z.string().uuid().parse(req.params.id);
+    const body = z
+      .object({
+        title: z.string().min(1).max(100).optional(),
+        description: z.string().max(5000).optional(),
+        tags: z.array(z.string().max(60)).max(30).optional(),
+        privacyStatus: z.enum(['private', 'unlisted', 'public']).default('private'),
+        scheduledPublishTime: z.string().nullable().optional(),
+        youtubeAccountId: z.string().uuid().nullable().optional(),
+      })
+      .parse(req.body || {});
+
+    const supabase = getSupabaseAdmin();
+    const { data: project } = await supabase
+      .from('projects')
+      .select('*')
+      .eq('id', projectId)
+      .eq('user_id', userId)
+      .maybeSingle();
+
+    if (!project) {
+      res.status(404).json({ error: 'Project not found' });
+      return;
+    }
+    if (!project.final_video_storage_path) {
+      res.status(400).json({
+        error: 'Video file is not rendered yet. Wait for rendering to finish or tap Re-Render.',
+      });
+      return;
+    }
+
+    await enforceUserJobQuota(userId);
+
+    const existingUpload = (project.upload_config || {}) as Record<string, unknown>;
+    const existingSeo = (project.seo_metadata || {}) as Record<string, unknown>;
+
+    await supabase
+      .from('projects')
+      .update({
+        title: body.title?.trim() || project.title,
+        status: 'uploading',
+        seo_metadata: {
+          ...existingSeo,
+          title: body.title?.trim() || existingSeo.title || project.title,
+          description: body.description ?? existingSeo.description ?? '',
+          tags: body.tags ?? existingSeo.tags ?? [],
+        },
+        upload_config: {
+          ...existingUpload,
+          auto_upload: true,
+          review_before_upload: false,
+          privacy_status: body.scheduledPublishTime ? 'private' : body.privacyStatus,
+          scheduled_publish_time: body.scheduledPublishTime || null,
+          youtube_account_id: body.youtubeAccountId ?? existingUpload.youtube_account_id ?? null,
+        },
+      })
+      .eq('id', projectId)
+      .eq('user_id', userId);
+
+    // Mark any paused awaiting_approval job as superseded so queue stays tidy
+    await supabase
+      .from('video_jobs')
+      .update({
+        status: 'cancelled',
+        status_message: 'Approved — handed off to YouTube upload job',
+        locked_by: null,
+      })
+      .eq('project_id', projectId)
+      .eq('user_id', userId)
+      .eq('status', 'awaiting_approval');
+
+    const { data: job, error } = await supabase
+      .from('video_jobs')
+      .insert({
+        user_id: userId,
+        project_id: projectId,
+        job_type: 'upload_only',
+        status: 'queued',
+        current_stage: 'uploading',
+        progress: 94,
+        completed_stages: [
+          'researching',
+          'generating_script',
+          'generating_scenes',
+          'searching_media',
+          'downloading_media',
+          'generating_voice',
+          'preparing_timeline',
+          'rendering',
+          'generating_metadata',
+          'generating_thumbnail',
+          'quality_check',
+        ],
+        status_message: 'Approved by user — pushing video to YouTube',
+        idempotency_key: `publish-${projectId}-${crypto.randomUUID()}`,
+      })
+      .select('*')
+      .single();
+
+    if (error) throw new Error(error.message);
+    res.status(201).json({ job });
   } catch (err) {
     res.status(400).json({ error: sanitizeErrorMessage(err) });
   }

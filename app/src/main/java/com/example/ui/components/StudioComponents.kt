@@ -80,6 +80,11 @@ fun StatusPill(
             StudioEmerald,
             status.replace('_', ' ').uppercase()
         )
+        "ready_for_review" -> Triple(
+            StudioAmber.copy(alpha = 0.22f),
+            StudioAmber,
+            "READY FOR REVIEW"
+        )
         "scheduled", "awaiting_approval", "queued" -> Triple(
             StudioAmber.copy(alpha = 0.18f),
             StudioAmber,

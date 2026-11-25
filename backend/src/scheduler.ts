@@ -1,5 +1,6 @@
 import { sanitizeErrorMessage } from './config/env.js';
 import { getSupabaseAdmin } from './db/supabase.js';
+import { normalizeSubtitlePreset } from './services/ffmpegRenderer.js';
 
 export interface ChannelScheduleConfig {
   channelId: string;
@@ -16,6 +17,7 @@ export interface ChannelScheduleConfig {
   timezone: string;
   voiceProvider?: string;
   voiceId?: string;
+  subtitleStyle?: string;
   autoPublish?: boolean;
   uploadPrivacy?: 'private' | 'unlisted' | 'public';
   preferredTopics?: string[];
@@ -352,12 +354,26 @@ export async function runSchedulerTick(): Promise<{ enqueued: number; skipped: n
               quality_preset: cs.qualityPreset === '720p' ? '720p' : '1080p',
               auto_produce: true,
               voice_provider: String(cs.voiceProvider || prefs.voice_provider || 'gemini_tts'),
-              voice_id: String(cs.voiceId || prefs.voice_id || 'Kore'),
+              voice_id: String(cs.voiceId || prefs.voice_id || 'Charon'),
+              subtitle_style: {
+                enabled: true,
+                burn_in: true,
+                preset: normalizeSubtitlePreset(
+                  String(cs.subtitleStyle || prefs.subtitle_style || 'mrbeast')
+                ),
+                font_size: 44,
+                primary_color: '#FFFFFF',
+                highlight_color: '#FFE600',
+                outline_color: '#000000',
+                position: 'bottom_safe',
+              },
               upload_config: {
                 auto_upload: cs.autoPublish !== undefined ? Boolean(cs.autoPublish) : Boolean(prefs.auto_publish),
+                review_before_upload: false,
                 privacy_status: String(cs.uploadPrivacy || prefs.upload_privacy || 'private'),
                 scheduled_publish_time: null,
                 youtube_account_id: cs.channelId,
+                media_source_mode: 'all',
               },
               status: 'queued',
             })
@@ -440,12 +456,24 @@ export async function runSchedulerTick(): Promise<{ enqueued: number; skipped: n
           quality_preset: prefs.quality_preset === '720p' ? '720p' : '1080p',
           auto_produce: true,
           voice_provider: String(prefs.voice_provider || 'gemini_tts'),
-          voice_id: String(prefs.voice_id || 'Kore'),
+          voice_id: String(prefs.voice_id || 'Charon'),
+          subtitle_style: {
+            enabled: true,
+            burn_in: true,
+            preset: normalizeSubtitlePreset(String(prefs.subtitle_style || 'mrbeast')),
+            font_size: 44,
+            primary_color: '#FFFFFF',
+            highlight_color: '#FFE600',
+            outline_color: '#000000',
+            position: 'bottom_safe',
+          },
           upload_config: {
             auto_upload: Boolean(prefs.auto_publish),
+            review_before_upload: false,
             privacy_status: String(prefs.upload_privacy || 'private'),
             scheduled_publish_time: null,
             youtube_account_id: targetChannelId || null,
+            media_source_mode: 'all',
           },
           status: 'queued',
         })

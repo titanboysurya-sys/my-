@@ -15,10 +15,12 @@ import {
 import {
   downloadAndPersistMedia,
   findBestMediaForScene,
+  type MediaSourceMode,
   type ScoredMediaCandidate,
 } from './mediaSearchService.js';
 import {
   generateThumbnailFromVideo,
+  normalizeSubtitlePreset,
   renderVideoWithFfmpeg,
   type SubtitleStyleConfig,
   type TimelineSceneClip,
@@ -161,6 +163,129 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
 
     if (projectErr || !project) {
       throw new Error('Associated video project was not found.');
+    }
+
+    const uploadCfgTop = (project.upload_config || {}) as {
+      auto_upload?: boolean;
+      review_before_upload?: boolean;
+      privacy_status?: 'private' | 'unlisted' | 'public';
+      scheduled_publish_time?: string | null;
+      youtube_account_id?: string | null;
+      media_source_mode?: MediaSourceMode;
+      custom_media_urls?: string[];
+    };
+
+    // =========================================================================
+    // FAST PATH: upload_only (User reviewed & approved the already-rendered MP4)
+    // =========================================================================
+    if (job.job_type === 'upload_only') {
+      if (!project.final_video_storage_path) {
+        throw new Error(
+          'No rendered video file is available for upload. Tap "Save & Re-Render Video" first.'
+        );
+      }
+
+      await updateJobStage(
+        job.id,
+        project.id,
+        'uploading',
+        95,
+        'Downloading approved video & uploading via YouTube Data API v3',
+        completedStages
+      );
+
+      const { data: videoBlob, error: dlErr } = await supabase.storage
+        .from('rendered-videos')
+        .download(project.final_video_storage_path);
+      if (dlErr || !videoBlob) {
+        throw new Error(`Could not retrieve rendered MP4 from storage: ${dlErr?.message || 'missing file'}`);
+      }
+      const localVideoPath = resolveConfinedPath(workDir, 'approved_final.mp4');
+      await fs.writeFile(localVideoPath, Buffer.from(await videoBlob.arrayBuffer()));
+
+      let localThumbPath: string | null = null;
+      if (project.thumbnail_storage_path) {
+        const { data: thumbBlob } = await supabase.storage
+          .from('thumbnails')
+          .download(project.thumbnail_storage_path);
+        if (thumbBlob) {
+          localThumbPath = resolveConfinedPath(workDir, 'approved_thumb.jpg');
+          await fs.writeFile(localThumbPath, Buffer.from(await thumbBlob.arrayBuffer()));
+        }
+      }
+
+      const seoMeta = (project.seo_metadata || {}) as GeneratedSeoMetadata;
+      const finalTitle = (seoMeta.title || project.title || project.topic || 'AutoTube Video').slice(0, 100);
+      const fullDescription = [
+        seoMeta.description || '',
+        seoMeta.hashtags?.length ? `\n${seoMeta.hashtags.join(' ')}` : '',
+      ]
+        .filter(Boolean)
+        .join('\n');
+
+      await recordNotification({
+        userId: job.user_id,
+        projectId: project.id,
+        jobId: job.id,
+        eventType: 'upload_started',
+        title: 'YouTube upload started',
+        body: `Uploading approved video "${finalTitle}" to YouTube.`,
+      });
+
+      const uploaded = await uploadVideoToYouTubeResumable({
+        userId: job.user_id,
+        projectId: project.id,
+        youtubeAccountId: uploadCfgTop.youtube_account_id || null,
+        localVideoPath,
+        localThumbnailPath: localThumbPath,
+        title: finalTitle,
+        description: fullDescription,
+        tags: Array.isArray(seoMeta.tags) ? seoMeta.tags : [],
+        categoryId: seoMeta.categoryId || '27',
+        privacyStatus: uploadCfgTop.privacy_status || 'private',
+        scheduledPublishTimeIso: uploadCfgTop.scheduled_publish_time || null,
+        idempotencyKey: `yt-upload-${project.id}-${job.id}`,
+        onProgress: async (pct) => {
+          await supabase
+            .from('video_jobs')
+            .update({ progress: 94 + Math.round(pct * 0.05), heartbeat_at: new Date().toISOString() })
+            .eq('id', job.id);
+        },
+      });
+
+      markStageDone('uploading');
+      const channelLabel = uploaded.channelName ? ` (${uploaded.channelName})` : '';
+      const msg =
+        uploaded.status === 'scheduled'
+          ? `Scheduled on YouTube${channelLabel}: ${uploaded.videoUrl}`
+          : `Published on YouTube${channelLabel}: ${uploaded.videoUrl}`;
+
+      await recordNotification({
+        userId: job.user_id,
+        projectId: project.id,
+        jobId: job.id,
+        eventType: uploaded.status === 'scheduled' ? 'upload_completed' : 'video_published',
+        title: uploaded.status === 'scheduled' ? 'Video scheduled on YouTube' : 'Video published on YouTube',
+        body: msg,
+      });
+
+      await supabase
+        .from('video_jobs')
+        .update({
+          status: uploaded.status,
+          current_stage: uploaded.status,
+          progress: 100,
+          status_message: msg,
+          completed_stages: completedStages,
+          error_code: null,
+          error_message: null,
+          locked_by: null,
+          completed_at: new Date().toISOString(),
+        })
+        .eq('id', job.id);
+
+      await supabase.from('projects').update({ status: uploaded.status }).eq('id', project.id);
+      return;
     }
 
     await recordNotification({
@@ -351,8 +476,26 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
       completedStages
     );
 
+    const projectCustomUrls = Array.isArray(uploadCfgTop.custom_media_urls)
+      ? uploadCfgTop.custom_media_urls.map((u) => String(u).trim()).filter((u) => u.startsWith('https://'))
+      : [];
+    const mediaSourceMode: MediaSourceMode =
+      uploadCfgTop.media_source_mode === 'open_source_only' ||
+      uploadCfgTop.media_source_mode === 'api_only'
+        ? uploadCfgTop.media_source_mode
+        : 'all';
+
     for (let i = 0; i < scenes.length; i++) {
       const scene = scenes[i];
+      const rawKeywords = Array.isArray(scene.search_keywords)
+        ? scene.search_keywords.map((k: unknown) => String(k))
+        : [];
+      const sceneCustomUrlEntry = rawKeywords.find((k: string) => k.startsWith('custom_url:'));
+      const sceneCustomUrl = sceneCustomUrlEntry
+        ? sceneCustomUrlEntry.slice('custom_url:'.length).trim()
+        : projectCustomUrls[i] || null;
+      const cleanKeywords = rawKeywords.filter((k: string) => !k.startsWith('custom_url:'));
+
       const { data: existingAsset } = await supabase
         .from('media_assets')
         .select('*')
@@ -362,7 +505,7 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
         .limit(1)
         .maybeSingle();
 
-      if (existingAsset?.storage_path) {
+      if (existingAsset?.storage_path && (!sceneCustomUrl || existingAsset.original_url === sceneCustomUrl)) {
         const ext = existingAsset.media_type === 'video' ? '.mp4' : '.jpg';
         const localPath = resolveConfinedPath(workDir, `scene_${scene.id}${ext}`);
         const { data: blob } = await supabase.storage
@@ -387,18 +530,21 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
         userId: job.user_id,
         projectId: project.id,
         sceneId: scene.id,
+        narration: scene.narration,
         visualDescription: scene.visual_description,
         primaryKeyword: scene.primary_keyword,
-        alternativeKeywords: Array.isArray(scene.search_keywords) ? scene.search_keywords : [],
+        alternativeKeywords: cleanKeywords,
         preferredType: scene.media_type_preference === 'image' ? 'image' : 'video',
         targetDurationSec: Number(scene.duration || 5),
         format: project.format,
         usedExternalIds,
+        mediaSourceMode,
+        customMediaUrl: sceneCustomUrl,
       });
 
       if (!candidate) {
         throw new Error(
-          `No relevant footage found for Scene ${scene.scene_number} ("${scene.primary_keyword}"). Ensure Pexels or Pixabay API keys are connected.`
+          `No relevant footage found for Scene ${scene.scene_number} ("${scene.primary_keyword}"). Add a custom open-source URL or connect Pexels/Pixabay.`
         );
       }
       usedExternalIds.add(candidate.externalId);
@@ -564,8 +710,12 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
     const subtitleStyle: SubtitleStyleConfig = {
       enabled: subCfgRaw.enabled !== false,
       burnIn: subCfgRaw.burn_in !== false,
+      preset: normalizeSubtitlePreset(
+        typeof subCfgRaw.preset === 'string' ? subCfgRaw.preset : 'mrbeast'
+      ),
       fontSize: Number(subCfgRaw.font_size || 44),
       primaryColor: String(subCfgRaw.primary_color || '#FFFFFF'),
+      highlightColor: String(subCfgRaw.highlight_color || '#FFE600'),
       outlineColor: String(subCfgRaw.outline_color || '#000000'),
       position:
         subCfgRaw.position === 'center' || subCfgRaw.position === 'top_safe'
@@ -690,17 +840,19 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
 
     const uploadCfg = (project.upload_config || {}) as {
       auto_upload?: boolean;
+      review_before_upload?: boolean;
       privacy_status?: 'private' | 'unlisted' | 'public';
       scheduled_publish_time?: string | null;
       youtube_account_id?: string | null;
     };
 
     let finalJobStatus: 'published' | 'scheduled' = 'published';
-    let finalMessage = 'Video rendered and saved to Studio Library';
+    let finalMessage = 'Video rendered and saved to Studio Library (ready to preview & download)';
 
     const autoCleanupStorage = process.env.AUTO_CLEANUP_STORAGE_AFTER_UPLOAD !== 'false';
+    const cleanupFinalVideoAfterUpload = process.env.AUTO_CLEANUP_FINAL_VIDEO_AFTER_UPLOAD === 'true';
 
-    // Helper to remove heavy files from Supabase Storage so free/pro buckets never fill up
+    // Helper to remove heavy intermediate files from Supabase Storage while keeping final MP4 downloadable
     const purgeProjectStorage = async (includeFinalVideo: boolean) => {
       try {
         const { data: assets } = await supabase
@@ -766,6 +918,41 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
       }
     };
 
+    // Pre-YouTube Final Review Gate: pause after rendering so user can watch, download, edit, or push to YouTube
+    if (uploadCfg.review_before_upload) {
+      if (autoCleanupStorage) {
+        await purgeProjectStorage(false);
+      }
+      await supabase
+        .from('video_jobs')
+        .update({
+          status: 'awaiting_approval',
+          current_stage: 'quality_check',
+          progress: 94,
+          status_message: 'Video ready — watch preview, download, edit, or tap Push to YouTube',
+          completed_stages: completedStages,
+          error_code: null,
+          error_message: null,
+          locked_by: null,
+        })
+        .eq('id', job.id);
+
+      await supabase
+        .from('projects')
+        .update({ status: 'ready_for_review' })
+        .eq('id', project.id);
+
+      await recordNotification({
+        userId: job.user_id,
+        projectId: project.id,
+        jobId: job.id,
+        eventType: 'video_ready_for_review',
+        title: 'Review video before YouTube push',
+        body: `"${seo.title}" is rendered! Open Projects Library to watch, download, edit, or push to YouTube.`,
+      });
+      return;
+    }
+
     if (uploadCfg.auto_upload) {
       await updateJobStage(job.id, project.id, 'uploading', 95, 'Uploading video via YouTube Data API v3', completedStages);
       await recordNotification({
@@ -813,9 +1000,9 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
           ? `Scheduled on YouTube${channelLabel}: ${uploaded.videoUrl}`
           : `Published on YouTube${channelLabel}: ${uploaded.videoUrl}`;
 
-      // Zero-bloat mode: delete heavy MP4, clips, audio, and SRT from cloud storage once on YouTube
+      // Always purge heavy intermediate clips/audio; keep final MP4 downloadable in Library unless explicitly configured otherwise
       if (autoCleanupStorage) {
-        await purgeProjectStorage(true);
+        await purgeProjectStorage(cleanupFinalVideoAfterUpload);
       }
 
       await recordNotification({
@@ -827,7 +1014,7 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
         body: finalMessage,
       });
     } else if (autoCleanupStorage) {
-      // Even in manual preview mode, remove heavy intermediate stock clips & raw voice audio right away
+      // Remove heavy intermediate stock clips & raw voice audio; keep final rendered MP4 in Library
       await purgeProjectStorage(false);
     }
 

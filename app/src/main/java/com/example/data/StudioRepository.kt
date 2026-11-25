@@ -16,7 +16,10 @@ import com.example.core.network.DynamicBackendClient
 import com.example.core.network.HealthResponse
 import com.example.core.network.ProfilePreferencesRequest
 import com.example.core.network.ProjectDetailResponse
+import com.example.core.network.ProjectDto
+import com.example.core.network.PublishProjectRequest
 import com.example.core.network.RegenerateScriptRequest
+import com.example.core.network.RerenderProjectRequest
 import com.example.core.network.SaveCredentialResponse
 import com.example.core.network.ScheduleDto
 import com.example.core.network.ScriptDto
@@ -25,6 +28,7 @@ import com.example.core.network.SupabaseAuthRequest
 import com.example.core.network.SupabaseIdTokenRequest
 import com.example.core.network.TopicResearchRequest
 import com.example.core.network.TopicResearchResponse
+import com.example.core.network.UpdateProjectSettingsRequest
 import com.example.core.network.UpdateScheduleRequest
 import com.example.core.network.UpdateScriptRequest
 import com.example.core.network.ValidateCredentialResponse
@@ -388,6 +392,33 @@ class StudioRepository(
             projectId,
             RegenerateScriptRequest(tone, durationSeconds)
         ).script
+    }
+
+    suspend fun updateProjectSettings(
+        projectId: String,
+        request: UpdateProjectSettingsRequest
+    ): Result<ProjectDto> = safeApiCall {
+        client.backendApi().updateProjectSettings(projectId, request).project
+    }
+
+    suspend fun rerenderProject(
+        projectId: String,
+        request: RerenderProjectRequest
+    ): Result<VideoJobDto> = safeApiCall {
+        val uid = requireUserId()
+        val job = client.backendApi().rerenderProject(projectId, request).job
+        database.jobDao().upsert(job.toEntity(uid))
+        job
+    }
+
+    suspend fun publishProject(
+        projectId: String,
+        request: PublishProjectRequest
+    ): Result<VideoJobDto> = safeApiCall {
+        val uid = requireUserId()
+        val job = client.backendApi().publishProject(projectId, request).job
+        database.jobDao().upsert(job.toEntity(uid))
+        job
     }
 
     suspend fun deleteProject(projectId: String): Result<Unit> = safeApiCall {

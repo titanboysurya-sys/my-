@@ -345,6 +345,10 @@ private fun AutoTubeStudioRoot(viewModel: StudioViewModel) {
                                     onCreateNew = { navController.navigate(StudioRoutes.CREATE) },
                                     onOpenProject = { id ->
                                         navController.navigate(StudioRoutes.projectDetail(id))
+                                    },
+                                    onDownloadFeedback = { msg, isError ->
+                                        if (isError) viewModel.reportExternalError(msg)
+                                        else viewModel.reportExternalInfo(msg)
                                     }
                                 )
                             }
@@ -426,9 +430,16 @@ private fun AutoTubeStudioRoot(viewModel: StudioViewModel) {
                                 ProjectDetailScreen(
                                     projectId = pid,
                                     uiState = uiState,
+                                    channels = channels,
                                     onLoadDetail = viewModel::loadProjectDetail,
                                     onSaveScript = viewModel::saveProjectScript,
                                     onRegenerateScript = viewModel::regenerateProjectScript,
+                                    onSaveSettingsAndRerender = viewModel::saveProjectSettingsAndRerender,
+                                    onPublishProject = viewModel::publishProjectToYouTube,
+                                    onNotifyUser = { msg, isError ->
+                                        if (isError) viewModel.reportExternalError(msg)
+                                        else viewModel.reportExternalInfo(msg)
+                                    },
                                     onOpenJobDetail = { jobId ->
                                         navController.navigate(StudioRoutes.jobDetail(jobId))
                                     },

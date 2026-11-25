@@ -212,11 +212,18 @@ data class CreateProjectRequest(
     val qualityPreset: String = "1080p",
     val autoProduce: Boolean = true,
     val voiceProvider: String = "gemini_tts",
-    val voiceId: String = "Kore",
+    val voiceId: String = "Charon",
+    val voiceSpeed: Double = 1.0,
+    val subtitlePreset: String = "mrbeast",
+    val subtitlePosition: String = "bottom_safe",
+    val subtitlesEnabled: Boolean = true,
     val autoUpload: Boolean = false,
+    val reviewBeforeUpload: Boolean = true,
     val privacyStatus: String = "private",
     val scheduledPublishTime: String? = null,
     val youtubeAccountId: String? = null,
+    val mediaSourceMode: String = "all",
+    val customMediaUrls: List<String>? = null,
     val startImmediately: Boolean = true
 )
 
@@ -231,10 +238,22 @@ data class ProjectDto(
     val format: String = "9:16",
     @Json(name = "duration_seconds") val durationSeconds: Int = 60,
     @Json(name = "quality_preset") val qualityPreset: String = "1080p",
+    @Json(name = "voice_provider") val voiceProvider: String = "gemini_tts",
+    @Json(name = "voice_id") val voiceId: String = "Charon",
+    @Json(name = "voice_speed") val voiceSpeed: Double = 1.0,
+    @Json(name = "subtitle_style") val subtitleStyle: Map<String, Any?>? = null,
+    @Json(name = "upload_config") val uploadConfig: Map<String, Any?>? = null,
+    @Json(name = "seo_metadata") val seoMetadata: Map<String, Any?>? = null,
     val status: String = "queued",
     @Json(name = "thumbnail_signed_url") val thumbnailSignedUrl: String? = null,
     @Json(name = "video_signed_url") val videoSignedUrl: String? = null,
+    @Json(name = "subtitle_signed_url") val subtitleSignedUrl: String? = null,
     @Json(name = "created_at") val createdAt: String = ""
+)
+
+@JsonClass(generateAdapter = true)
+data class ProjectSingleResponse(
+    val project: ProjectDto
 )
 
 @JsonClass(generateAdapter = true)
@@ -268,6 +287,7 @@ data class SceneDto(
     val narration: String = "",
     @Json(name = "visual_description") val visualDescription: String = "",
     @Json(name = "primary_keyword") val primaryKeyword: String = "",
+    @Json(name = "search_keywords") val searchKeywords: List<String> = emptyList(),
     val duration: Double = 5.0,
     val status: String = "pending",
     @Json(name = "fallback_used") val fallbackUsed: Boolean = false
@@ -279,6 +299,47 @@ data class ProjectDetailResponse(
     val scripts: List<ScriptDto> = emptyList(),
     val scenes: List<SceneDto> = emptyList(),
     val jobs: List<VideoJobDto> = emptyList()
+)
+
+@JsonClass(generateAdapter = true)
+data class SceneOverrideRequest(
+    val sceneId: String,
+    val primaryKeyword: String? = null,
+    val customMediaUrl: String? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class UpdateProjectSettingsRequest(
+    val title: String? = null,
+    val description: String? = null,
+    val tags: List<String>? = null,
+    val voiceProvider: String? = null,
+    val voiceId: String? = null,
+    val voiceSpeed: Double? = null,
+    val subtitlePreset: String? = null,
+    val subtitlePosition: String? = null,
+    val subtitlesEnabled: Boolean? = null,
+    val mediaSourceMode: String? = null,
+    val customMediaUrls: List<String>? = null,
+    val sceneOverrides: List<SceneOverrideRequest>? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class RerenderProjectRequest(
+    val regenerateVoice: Boolean = true,
+    val refetchMedia: Boolean = false,
+    val regenerateScenes: Boolean = false,
+    val reviewBeforeUpload: Boolean = true
+)
+
+@JsonClass(generateAdapter = true)
+data class PublishProjectRequest(
+    val title: String? = null,
+    val description: String? = null,
+    val tags: List<String>? = null,
+    val privacyStatus: String = "private",
+    val scheduledPublishTime: String? = null,
+    val youtubeAccountId: String? = null
 )
 
 @JsonClass(generateAdapter = true)

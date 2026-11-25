@@ -1,14 +1,20 @@
 import crypto from 'node:crypto';
 import { createWriteStream } from 'node:fs';
 import fs from 'node:fs/promises';
-import path from 'node:path';
 import { config } from '../config/env.js';
 import { getSupabaseAdmin, uploadToStorageWithAutoBucket } from '../db/supabase.js';
-import { assertSafeExternalUrl, resolveConfinedPath } from '../security/urlGuard.js';
+import {
+  assertSafeExternalUrl,
+  assertSafeExternalUrlAsync,
+  resolveConfinedPath,
+} from '../security/urlGuard.js';
 import { resolveUserProviderKey } from './credentialService.js';
 
+export type MediaProviderDbKey = 'pexels' | 'pixabay' | 'wikimedia' | 'nasa' | 'user_upload';
+export type MediaSourceMode = 'all' | 'open_source_only' | 'api_only';
+
 export interface MediaCandidate {
-  provider: 'pexels' | 'pixabay' | 'wikimedia';
+  provider: MediaProviderDbKey;
   externalId: string;
   mediaType: 'video' | 'image';
   originalUrl: string;
@@ -19,6 +25,7 @@ export interface MediaCandidate {
   titleOrTags: string;
   authorName: string;
   licenseMetadata: Record<string, unknown>;
+  isUserSuppliedUrl?: boolean;
 }
 
 export interface ScoredMediaCandidate extends MediaCandidate {
@@ -30,6 +37,7 @@ export interface SceneMediaSearchInput {
   userId: string;
   projectId: string;
   sceneId: string;
+  narration?: string;
   visualDescription: string;
   primaryKeyword: string;
   alternativeKeywords: string[];
@@ -37,10 +45,12 @@ export interface SceneMediaSearchInput {
   targetDurationSec: number;
   format: '9:16' | '16:9' | '1:1';
   usedExternalIds: Set<string>;
+  mediaSourceMode?: MediaSourceMode;
+  customMediaUrl?: string | null;
 }
 
 /**
- * Multi-factor media relevance scorer (keyword overlap + orientation + resolution + duration + type).
+ * Multi-factor media relevance scorer (keyword overlap + voiceover context + orientation + resolution + duration + type).
  * Prevents assigning unrelated clips merely because a search returned results.
  */
 export function scoreMediaCandidate(
@@ -48,6 +58,7 @@ export function scoreMediaCandidate(
   params: {
     keywords: string[];
     visualDescription: string;
+    narration?: string;
     targetDurationSec: number;
     format: '9:16' | '16:9' | '1:1';
     preferredType: 'video' | 'image';
@@ -56,7 +67,9 @@ export function scoreMediaCandidate(
 ): number {
   if (params.alreadyUsed) return 0;
 
-  const targetTokens = tokenize(`${params.keywords.join(' ')} ${params.visualDescription}`);
+  const targetTokens = tokenize(
+    `${params.keywords.join(' ')} ${params.visualDescription} ${params.narration || ''}`
+  );
   const candidateTokens = tokenize(candidate.titleOrTags);
 
   let overlap = 0;
@@ -70,19 +83,19 @@ export function scoreMediaCandidate(
   const ratio = candidate.height > 0 ? candidate.width / candidate.height : 1;
   let orientationScore = 0.6;
   if (params.format === '9:16') {
-    orientationScore = ratio < 0.85 ? 1.0 : ratio <= 1.2 ? 0.65 : 0.35;
+    orientationScore = ratio < 0.85 ? 1.0 : ratio <= 1.2 ? 0.68 : 0.38;
   } else if (params.format === '16:9') {
-    orientationScore = ratio > 1.3 ? 1.0 : ratio >= 0.9 ? 0.65 : 0.3;
+    orientationScore = ratio > 1.3 ? 1.0 : ratio >= 0.9 ? 0.68 : 0.34;
   } else {
-    orientationScore = ratio >= 0.8 && ratio <= 1.25 ? 1.0 : 0.7;
+    orientationScore = ratio >= 0.8 && ratio <= 1.25 ? 1.0 : 0.72;
   }
 
   // Resolution quality score
-  const minDim = Math.min(candidate.width, candidate.height);
-  const resolutionScore = minDim >= 1080 ? 1.0 : minDim >= 720 ? 0.85 : minDim >= 480 ? 0.55 : 0.25;
+  const minDim = Math.min(candidate.width || 1280, candidate.height || 720);
+  const resolutionScore = minDim >= 1080 ? 1.0 : minDim >= 720 ? 0.85 : minDim >= 480 ? 0.58 : 0.3;
 
-  // Duration suitability (penalize ultra-short < 2.5s video clips that loop choppily)
-  let durationScore = 0.78;
+  // Duration suitability (penalize ultra-short < 2.2s video clips that loop choppily)
+  let durationScore = 0.8;
   if (candidate.mediaType === 'video' && candidate.durationSec > 0) {
     if (candidate.durationSec < 2.2) {
       durationScore = 0.2;
@@ -98,13 +111,13 @@ export function scoreMediaCandidate(
     }
   }
 
-  const typeScore = candidate.mediaType === params.preferredType ? 1.0 : 0.6;
+  const typeScore = candidate.mediaType === params.preferredType ? 1.0 : 0.68;
 
   const weighted =
-    keywordScore * 0.48 +
-    orientationScore * 0.2 +
+    keywordScore * 0.52 +
+    orientationScore * 0.18 +
     resolutionScore * 0.12 +
-    durationScore * 0.12 +
+    durationScore * 0.1 +
     typeScore * 0.08;
 
   return Math.round(Math.max(0, Math.min(1, weighted)) * 1000) / 1000;
@@ -114,7 +127,7 @@ function extractUrlSlugText(url: string): string {
   try {
     const pathname = new URL(url).pathname;
     return pathname
-      .replace(/\/(video|photo|videos|photos)\//gi, ' ')
+      .replace(/\/(video|photo|videos|photos|file|details)\//gi, ' ')
       .replace(/-\d+\/?$/g, ' ')
       .replace(/[-_/]+/g, ' ')
       .trim();
@@ -144,6 +157,9 @@ function tokenize(input: string): Set<string> {
     'free',
     'stock',
     'footage',
+    'showing',
+    'close',
+    'cinematic',
   ]);
   return new Set(
     input
@@ -152,6 +168,122 @@ function tokenize(input: string): Set<string> {
       .split(/\s+/)
       .filter((w) => w.length >= 3 && !stopWords.has(w))
   );
+}
+
+/**
+ * Resolves a user-supplied open-source or direct HTTPS media link into a downloadable ScoredMediaCandidate.
+ * Supports:
+ * - Direct HTTPS image/video links (.mp4, .webm, .mov, .jpg, .jpeg, .png, .webp)
+ * - Wikimedia Commons file pages (https://commons.wikimedia.org/wiki/File:...)
+ * - Internet Archive item pages (https://archive.org/details/...)
+ */
+export async function resolveUserCustomMediaLink(
+  rawUrl: string,
+  sceneHint: string
+): Promise<ScoredMediaCandidate | null> {
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return null;
+
+  const parsed = await assertSafeExternalUrlAsync(trimmed, 'user_media');
+  let downloadUrl = parsed.toString();
+  let mediaType: 'video' | 'image' = /\.(mp4|webm|mov|m4v)(\?|$)/i.test(parsed.pathname)
+    ? 'video'
+    : 'image';
+  let sourceName = 'Custom Link';
+
+  // Auto-resolve Wikimedia Commons wiki/File:... pages to direct file URL
+  if (
+    parsed.hostname.endsWith('wikimedia.org') &&
+    /\/wiki\/File:/i.test(parsed.pathname)
+  ) {
+    const fileTitle = decodeURIComponent(parsed.pathname.replace(/^.*\/wiki\//i, ''));
+    const apiUrl = `https://commons.wikimedia.org/w/api.php?action=query&titles=${encodeURIComponent(
+      fileTitle
+    )}&prop=imageinfo&iiprop=url|mime|size&format=json`;
+    const res = await fetch(apiUrl, {
+      headers: { 'User-Agent': 'AutoTubeStudio/1.0 (+https://autotubestudio.app)' },
+    }).catch(() => null);
+    if (res?.ok) {
+      const data = (await res.json()) as {
+        query?: {
+          pages?: Record<string, { imageinfo?: Array<{ url?: string; mime?: string }> }>;
+        };
+      };
+      const info = Object.values(data.query?.pages || {})[0]?.imageinfo?.[0];
+      if (info?.url) {
+        await assertSafeExternalUrlAsync(info.url, 'user_media');
+        downloadUrl = info.url;
+        mediaType = (info.mime || '').startsWith('video/') ? 'video' : 'image';
+        sourceName = 'Wikimedia Commons Link';
+      }
+    }
+  }
+
+  // Auto-resolve Internet Archive /details/<id> pages to direct MP4/image file
+  if (
+    parsed.hostname.endsWith('archive.org') &&
+    /^\/details\/([^/?#]+)/i.test(parsed.pathname)
+  ) {
+    const itemId = parsed.pathname.match(/^\/details\/([^/?#]+)/i)?.[1];
+    if (itemId) {
+      const metaRes = await fetch(`https://archive.org/metadata/${encodeURIComponent(itemId)}`).catch(
+        () => null
+      );
+      if (metaRes?.ok) {
+        const meta = (await metaRes.json()) as {
+          files?: Array<{ name?: string; format?: string; size?: string }>;
+        };
+        const mp4 = (meta.files || []).find(
+          (f) => f.name && /\.mp4$/i.test(f.name) && Number(f.size || 0) < config.maxDownloadBytes
+        );
+        const img = (meta.files || []).find((f) => f.name && /\.(jpg|jpeg|png)$/i.test(f.name));
+        const chosen = mp4 || img;
+        if (chosen?.name) {
+          const direct = `https://archive.org/download/${encodeURIComponent(itemId)}/${encodeURIComponent(
+            chosen.name
+          )}`;
+          await assertSafeExternalUrlAsync(direct, 'user_media');
+          downloadUrl = direct;
+          mediaType = mp4 ? 'video' : 'image';
+          sourceName = 'Internet Archive Link';
+        }
+      }
+    }
+  }
+
+  // If extension wasn't explicit, probe Content-Type via lightweight HEAD request
+  if (!/\.(mp4|webm|mov|m4v|jpg|jpeg|png|webp)(\?|$)/i.test(new URL(downloadUrl).pathname)) {
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), 6000);
+    try {
+      const head = await fetch(downloadUrl, { method: 'HEAD', signal: controller.signal });
+      const ct = (head.headers.get('content-type') || '').toLowerCase();
+      if (ct.startsWith('video/')) mediaType = 'video';
+      else if (ct.startsWith('image/')) mediaType = 'image';
+    } catch {
+      // Fall back to default detection during download
+    } finally {
+      clearTimeout(t);
+    }
+  }
+
+  const hashId = crypto.createHash('sha1').update(downloadUrl).digest('hex').slice(0, 14);
+  return {
+    provider: 'user_upload',
+    externalId: `custom-${hashId}`,
+    mediaType,
+    originalUrl: trimmed,
+    downloadUrl,
+    width: 1280,
+    height: 720,
+    durationSec: mediaType === 'video' ? 8 : 0,
+    titleOrTags: `${sceneHint} ${extractUrlSlugText(trimmed)}`.trim(),
+    authorName: sourceName,
+    licenseMetadata: { license: 'User Supplied Open-Source Link', source: sourceName },
+    isUserSuppliedUrl: true,
+    relevanceScore: 1.0,
+    isFallback: mediaType === 'image',
+  };
 }
 
 async function searchPexels(
@@ -166,8 +298,8 @@ async function searchPexels(
       ? `https://api.pexels.com/videos/search?query=${encodeURIComponent(query)}&orientation=${orientation}&per_page=8`
       : `https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&orientation=${orientation}&per_page=8`;
 
-  const res = await fetch(url, { headers: { Authorization: apiKey } });
-  if (!res.ok) return [];
+  const res = await fetch(url, { headers: { Authorization: apiKey } }).catch(() => null);
+  if (!res?.ok) return [];
 
   if (mediaType === 'video') {
     const data = (await res.json()) as {
@@ -252,8 +384,8 @@ async function searchPixabay(
       ? `https://pixabay.com/api/videos/?key=${encodeURIComponent(apiKey)}&q=${encodeURIComponent(query)}&per_page=8&safesearch=true`
       : `https://pixabay.com/api/?key=${encodeURIComponent(apiKey)}&q=${encodeURIComponent(query)}&image_type=photo&per_page=8&safesearch=true`;
 
-  const res = await fetch(endpoint);
-  if (!res.ok) return [];
+  const res = await fetch(endpoint).catch(() => null);
+  if (!res?.ok) return [];
 
   if (mediaType === 'video') {
     const data = (await res.json()) as {
@@ -318,14 +450,17 @@ async function searchPixabay(
   }
 }
 
+/**
+ * Open-Source (No API Key): Wikimedia Commons high-res CC/Public Domain images
+ */
 async function searchWikimediaCommonsImages(query: string): Promise<MediaCandidate[]> {
   const url = `https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrnamespace=6&gsrsearch=${encodeURIComponent(
     `${query} filetype:bitmap`
-  )}&gsrlimit=6&prop=imageinfo&iiprop=url|size|extmetadata&format=json`;
+  )}&gsrlimit=8&prop=imageinfo&iiprop=url|size|mime|extmetadata&format=json`;
   const res = await fetch(url, {
     headers: { 'User-Agent': 'AutoTubeStudio/1.0 (+https://autotubestudio.app)' },
-  });
-  if (!res.ok) return [];
+  }).catch(() => null);
+  if (!res?.ok) return [];
 
   const data = (await res.json()) as {
     query?: {
@@ -339,9 +474,11 @@ async function searchWikimediaCommonsImages(query: string): Promise<MediaCandida
             descriptionurl: string;
             width: number;
             height: number;
+            mime?: string;
             extmetadata?: {
               LicenseShortName?: { value?: string };
               Artist?: { value?: string };
+              ImageDescription?: { value?: string };
             };
           }>;
         }
@@ -354,6 +491,11 @@ async function searchWikimediaCommonsImages(query: string): Promise<MediaCandida
     .map((p): MediaCandidate | null => {
       const info = p.imageinfo?.[0];
       if (!info?.url || info.width < 640) return null;
+      if (info.mime && !/^image\/(jpeg|png|webp)$/i.test(info.mime)) return null;
+      const cleanTitle = p.title.replace(/^File:/i, '').replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ');
+      const desc = (info.extmetadata?.ImageDescription?.value || '')
+        .replace(/<[^>]+>/g, ' ')
+        .slice(0, 140);
       return {
         provider: 'wikimedia' as const,
         externalId: `wiki-${p.pageid}`,
@@ -363,9 +505,12 @@ async function searchWikimediaCommonsImages(query: string): Promise<MediaCandida
         width: info.width,
         height: info.height,
         durationSec: 0,
-        titleOrTags: p.title.replace(/^File:/i, '').replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' '),
-        authorName: (info.extmetadata?.Artist?.value || 'Wikimedia Contributor').replace(/<[^>]+>/g, '').slice(0, 120),
+        titleOrTags: `${cleanTitle} ${desc}`.trim(),
+        authorName: (info.extmetadata?.Artist?.value || 'Wikimedia Contributor')
+          .replace(/<[^>]+>/g, '')
+          .slice(0, 120),
         licenseMetadata: {
+          source: 'Wikimedia Commons',
           license: info.extmetadata?.LicenseShortName?.value || 'Wikimedia Commons',
           attributionRequired: true,
         },
@@ -375,16 +520,234 @@ async function searchWikimediaCommonsImages(query: string): Promise<MediaCandida
 }
 
 /**
- * Executes ordered media search cascade:
- * 1. Primary + alternative keywords on Pexels & Pixabay (video)
- * 2. Fallback to Pexels & Pixabay image search (for Ken Burns motion)
- * 3. Fallback to Wikimedia Commons public-domain/CC images
+ * Open-Source (No API Key): Openverse Creative Commons curated photo index
+ */
+async function searchOpenverseImages(
+  query: string,
+  format: '9:16' | '16:9' | '1:1'
+): Promise<MediaCandidate[]> {
+  const aspect = format === '9:16' ? 'tall' : format === '16:9' ? 'wide' : 'square';
+  const url = `https://api.openverse.org/v1/images/?q=${encodeURIComponent(
+    query
+  )}&aspect_ratio=${aspect}&license_type=commercial&page_size=8`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 7000);
+  try {
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: { 'User-Agent': 'AutoTubeStudio/1.0' },
+    }).catch(() => null);
+    if (!res?.ok) return [];
+
+    const data = (await res.json()) as {
+      results?: Array<{
+        id: string;
+        title?: string;
+        url?: string;
+        foreign_landing_url?: string;
+        width?: number;
+        height?: number;
+        creator?: string;
+        license?: string;
+        tags?: Array<{ name?: string }>;
+      }>;
+    };
+
+    return (data.results || [])
+      .map((r): MediaCandidate | null => {
+        if (!r.url || !r.url.startsWith('https://')) return null;
+        const w = r.width || 1280;
+        const h = r.height || 720;
+        if (w < 640 || h < 480) return null;
+        // Ensure Openverse host is either in allowlist or safe public HTTPS image host
+        try {
+          assertSafeExternalUrl(r.url, 'user_media');
+        } catch {
+          return null;
+        }
+        const tagText = (r.tags || []).map((t) => t.name || '').join(' ');
+        return {
+          provider: 'wikimedia' as const, // stored under open-license provider enum
+          externalId: `openverse-${r.id}`,
+          mediaType: 'image' as const,
+          originalUrl: r.foreign_landing_url || r.url,
+          downloadUrl: r.url,
+          width: w,
+          height: h,
+          durationSec: 0,
+          titleOrTags: `${r.title || ''} ${tagText}`.trim(),
+          authorName: r.creator || 'Openverse Creator',
+          licenseMetadata: {
+            source: 'Openverse',
+            license: r.license || 'CC-BY',
+            attributionRequired: true,
+          },
+          isUserSuppliedUrl: true, // uses DNS-verified user_media guard because Openverse links to Flickr/Wikimedia/etc.
+        };
+      })
+      .filter((x): x is MediaCandidate => x !== null);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * Open-Source (No API Key): NASA Public Domain Image Library (great for space, science, earth, tech)
+ */
+async function searchNasaImages(query: string): Promise<MediaCandidate[]> {
+  const url = `https://images-api.nasa.gov/search?q=${encodeURIComponent(
+    query
+  )}&media_type=image&page_size=6`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 7000);
+  try {
+    const res = await fetch(url, { signal: controller.signal }).catch(() => null);
+    if (!res?.ok) return [];
+
+    const data = (await res.json()) as {
+      collection?: {
+        items?: Array<{
+          data?: Array<{
+            nasa_id?: string;
+            title?: string;
+            description?: string;
+            keywords?: string[];
+          }>;
+          links?: Array<{ href?: string; rel?: string; render?: string }>;
+        }>;
+      };
+    };
+
+    return (data.collection?.items || [])
+      .map((item): MediaCandidate | null => {
+        const meta = item.data?.[0];
+        const preview = item.links?.find((l) => l.rel === 'preview' && l.href?.startsWith('https://'));
+        if (!meta?.nasa_id || !preview?.href) return null;
+        return {
+          provider: 'nasa' as const,
+          externalId: `nasa-${meta.nasa_id}`,
+          mediaType: 'image' as const,
+          originalUrl: `https://images.nasa.gov/details-${meta.nasa_id}`,
+          downloadUrl: preview.href,
+          width: 1280,
+          height: 720,
+          durationSec: 0,
+          titleOrTags: `${meta.title || ''} ${(meta.keywords || []).join(' ')} ${(meta.description || '').slice(0, 120)}`.trim(),
+          authorName: 'NASA Public Domain',
+          licenseMetadata: { source: 'NASA', license: 'Public Domain', attributionRequired: false },
+        };
+      })
+      .filter((x): x is MediaCandidate => x !== null);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * Open-Source (No API Key): Internet Archive Public Domain / Creative Commons MP4 clips
+ */
+async function searchInternetArchiveVideos(query: string): Promise<MediaCandidate[]> {
+  const url = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(
+    `(${query}) AND mediatype:movies AND format:"h.264"`
+  )}&fl[]=identifier&fl[]=title&fl[]=description&fl[]=subject&rows=4&output=json`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 7000);
+  try {
+    const res = await fetch(url, { signal: controller.signal }).catch(() => null);
+    if (!res?.ok) return [];
+
+    const data = (await res.json()) as {
+      response?: {
+        docs?: Array<{
+          identifier?: string;
+          title?: string;
+          description?: string | string[];
+          subject?: string | string[];
+        }>;
+      };
+    };
+
+    const docs = (data.response?.docs || []).slice(0, 3);
+    const out: MediaCandidate[] = [];
+
+    for (const doc of docs) {
+      if (!doc.identifier) continue;
+      const metaRes = await fetch(
+        `https://archive.org/metadata/${encodeURIComponent(doc.identifier)}/files`,
+        { signal: controller.signal }
+      ).catch(() => null);
+      if (!metaRes?.ok) continue;
+      const meta = (await metaRes.json()) as {
+        result?: Array<{ name?: string; size?: string; length?: string; width?: string; height?: string }>;
+      };
+      const mp4 = (meta.result || []).find(
+        (f) =>
+          f.name &&
+          /\.mp4$/i.test(f.name) &&
+          Number(f.size || 0) > 20_000 &&
+          Number(f.size || 0) < 28 * 1024 * 1024
+      );
+      if (!mp4?.name) continue;
+      const subjects = Array.isArray(doc.subject) ? doc.subject.join(' ') : doc.subject || '';
+      out.push({
+        provider: 'wikimedia' as const, // open-source bucket in media_assets enum
+        externalId: `ia-${doc.identifier}`,
+        mediaType: 'video',
+        originalUrl: `https://archive.org/details/${doc.identifier}`,
+        downloadUrl: `https://archive.org/download/${encodeURIComponent(
+          doc.identifier
+        )}/${encodeURIComponent(mp4.name)}`,
+        width: Number(mp4.width || 1280),
+        height: Number(mp4.height || 720),
+        durationSec: Math.min(60, Math.max(4, Number(mp4.length || 10))),
+        titleOrTags: `${doc.title || ''} ${subjects}`.trim(),
+        authorName: 'Internet Archive',
+        licenseMetadata: {
+          source: 'Internet Archive',
+          license: 'Public Domain / Creative Commons',
+          attributionRequired: false,
+        },
+      });
+    }
+    return out;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * Executes voiceover-matched media search cascade:
+ * 0. User-provided custom / open-source direct link for this scene (highest priority!)
+ * 1. Pexels & Pixabay stock video + Internet Archive open-source video (when enabled)
+ * 2. Stock & Open-Source high-res images (Pexels, Pixabay, Openverse, Wikimedia Commons, NASA)
+ *    with strict semantic scoring against narration + visual description so visuals match voiceover!
  */
 export async function findBestMediaForScene(
   input: SceneMediaSearchInput
 ): Promise<ScoredMediaCandidate | null> {
-  const pexelsCred = await resolveUserProviderKey(input.userId, 'pexels');
-  const pixabayCred = await resolveUserProviderKey(input.userId, 'pixabay');
+  // Pass 0: Exact user-supplied media link for this scene
+  if (input.customMediaUrl?.trim()) {
+    try {
+      const resolved = await resolveUserCustomMediaLink(
+        input.customMediaUrl.trim(),
+        input.visualDescription || input.primaryKeyword
+      );
+      if (resolved) return resolved;
+    } catch (err) {
+      console.warn(
+        `[AutoTube Media] Custom link skipped for scene ${input.sceneId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      );
+    }
+  }
+
+  const mode: MediaSourceMode = input.mediaSourceMode || 'all';
+  const useApis = mode !== 'open_source_only';
+  const useOpenSource = mode !== 'api_only';
+
+  const pexelsCred = useApis ? await resolveUserProviderKey(input.userId, 'pexels') : null;
+  const pixabayCred = useApis ? await resolveUserProviderKey(input.userId, 'pixabay') : null;
 
   const keywords = [input.primaryKeyword, ...input.alternativeKeywords]
     .map((k) => k.trim())
@@ -398,77 +761,80 @@ export async function findBestMediaForScene(
         relevanceScore: scoreMediaCandidate(c, {
           keywords,
           visualDescription: input.visualDescription,
+          narration: input.narration,
           targetDurationSec: input.targetDurationSec,
           format: input.format,
           preferredType: input.preferredType,
           alreadyUsed: input.usedExternalIds.has(c.externalId),
         }),
       }))
-      .filter((c) => c.relevanceScore >= 0.35)
+      .filter((c) => c.relevanceScore >= 0.34)
       .sort((a, b) => b.relevanceScore - a.relevanceScore);
 
-  // Pass 1: Stock video search across keywords and providers — compare across keywords to pick highest relevance
+  // Pass 1: Stock video search across keywords and providers
   const allVideoCandidates: ScoredMediaCandidate[] = [];
-  for (const kw of keywords.slice(0, 3)) {
-    const batch: MediaCandidate[] = [];
-    if (pexelsCred) {
-      batch.push(...(await searchPexels(pexelsCred.apiKey, kw, 'video', input.format)));
+  if (useApis && (pexelsCred || pixabayCred)) {
+    for (const kw of keywords.slice(0, 3)) {
+      const batch: MediaCandidate[] = [];
+      if (pexelsCred) {
+        batch.push(...(await searchPexels(pexelsCred.apiKey, kw, 'video', input.format)));
+      }
+      if (pixabayCred) {
+        batch.push(...(await searchPixabay(pixabayCred.apiKey, kw, 'video')));
+      }
+      const ranked = evaluate(batch, false);
+      if (ranked.length > 0 && ranked[0].relevanceScore >= 0.72 && ranked[0].durationSec >= 2.5) {
+        return ranked[0];
+      }
+      allVideoCandidates.push(...ranked);
     }
-    if (pixabayCred) {
-      batch.push(...(await searchPixabay(pixabayCred.apiKey, kw, 'video')));
-    }
-    const ranked = evaluate(batch, false);
-    if (ranked.length > 0 && ranked[0].relevanceScore >= 0.72 && ranked[0].durationSec >= 2.5) {
-      return ranked[0];
-    }
-    allVideoCandidates.push(...ranked);
   }
+
+  // Pass 1b: Open-source video search (Internet Archive) when open-source mode is enabled and no high-confidence API video yet
+  if (useOpenSource && keywords.length > 0 && (!allVideoCandidates[0] || allVideoCandidates[0].relevanceScore < 0.62)) {
+    const iaBatch = await searchInternetArchiveVideos(keywords[0]);
+    allVideoCandidates.push(...evaluate(iaBatch, false));
+  }
+
   allVideoCandidates.sort((a, b) => b.relevanceScore - a.relevanceScore);
-  if (allVideoCandidates.length > 0 && allVideoCandidates[0].relevanceScore >= 0.42) {
+  if (allVideoCandidates.length > 0 && allVideoCandidates[0].relevanceScore >= 0.52) {
     return allVideoCandidates[0];
   }
 
-  // Pass 2: Stock image fallback (animated smoothly with Ken Burns zoom in FFmpeg)
+  // Pass 2: High-relevance images across BOTH stock APIs and Open-Source libraries (Openverse + Wikimedia + NASA)
   const allImageCandidates: ScoredMediaCandidate[] = [];
-  for (const kw of keywords.slice(0, 3)) {
-    const batch: MediaCandidate[] = [];
-    if (pexelsCred) {
-      batch.push(...(await searchPexels(pexelsCred.apiKey, kw, 'image', input.format)));
+  for (const kw of keywords.slice(0, 2)) {
+    const queries: Array<Promise<MediaCandidate[]>> = [];
+    if (pexelsCred) queries.push(searchPexels(pexelsCred.apiKey, kw, 'image', input.format));
+    if (pixabayCred) queries.push(searchPixabay(pixabayCred.apiKey, kw, 'image'));
+    if (useOpenSource) {
+      queries.push(searchWikimediaCommonsImages(kw));
+      queries.push(searchOpenverseImages(kw, input.format));
+      queries.push(searchNasaImages(kw));
     }
-    if (pixabayCred) {
-      batch.push(...(await searchPixabay(pixabayCred.apiKey, kw, 'image')));
-    }
-    const ranked = evaluate(batch, true);
-    if (ranked.length > 0 && ranked[0].relevanceScore >= 0.68) {
+    const batches = await Promise.all(queries);
+    const merged = batches.flat();
+    const ranked = evaluate(merged, true);
+    if (ranked.length > 0 && ranked[0].relevanceScore >= 0.72) {
       return ranked[0];
     }
     allImageCandidates.push(...ranked);
   }
+
+  // Compare best video vs best exact-match open-source/stock image so voiceover matching wins!
   allImageCandidates.sort((a, b) => b.relevanceScore - a.relevanceScore);
-  if (allImageCandidates.length > 0) {
-    return allImageCandidates[0];
-  }
+  const bestVid = allVideoCandidates[0] || null;
+  const bestImg = allImageCandidates[0] || null;
 
-  // Pass 3: If we had any video candidate above 0.35, prefer it over Wikimedia stills
-  if (allVideoCandidates.length > 0) {
-    return allVideoCandidates[0];
+  if (bestVid && bestImg) {
+    return bestImg.relevanceScore >= bestVid.relevanceScore + 0.14 ? bestImg : bestVid;
   }
-
-  // Pass 4: Wikimedia Commons open-license image fallback
-  for (const kw of keywords.slice(0, 2)) {
-    const wikiBatch = await searchWikimediaCommonsImages(kw);
-    const ranked = evaluate(wikiBatch, true);
-    if (ranked.length > 0) {
-      return ranked[0];
-    }
-  }
-
-  return null;
+  return bestVid || bestImg || null;
 }
 
 /**
- * Robust media downloader with SSRF protection, retry, file-size cap, SHA-256 deduplication,
- * and persistent storage upload to Supabase Storage `source-media`.
+ * Robust media downloader with SSRF protection, DNS verification, retry, file-size cap,
+ * SHA-256 deduplication, and persistent storage upload to Supabase Storage `source-media`.
  */
 export async function downloadAndPersistMedia(params: {
   userId: string;
@@ -509,13 +875,15 @@ export async function downloadAndPersistMedia(params: {
     }
   }
 
-  // Validate outbound URL before streaming directly to disk (avoids RAM spikes on 512 MB Render)
-  const safeUrl = assertSafeExternalUrl(params.candidate.downloadUrl, 'media');
+  // Validate outbound URL (plus DNS check for user/openverse links) before streaming to disk
+  const guardKind = params.candidate.isUserSuppliedUrl ? 'user_media' : 'media';
+  const safeUrl = await assertSafeExternalUrlAsync(params.candidate.downloadUrl, guardKind);
   const { sha256, sizeBytes } = await downloadToFileWithRetry(
     safeUrl.toString(),
     localFilePath,
     config.maxDownloadBytes,
-    3
+    3,
+    guardKind
   );
 
   // Basic file integrity check
@@ -558,16 +926,40 @@ async function downloadToFileWithRetry(
   url: string,
   destPath: string,
   maxBytes: number,
-  retries: number
+  retries: number,
+  guardKind: 'media' | 'user_media' = 'media'
 ): Promise<{ sha256: string; sizeBytes: number }> {
   let lastError: unknown;
   for (let attempt = 1; attempt <= retries; attempt++) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 45000);
     try {
-      const res = await fetch(url, { signal: controller.signal });
-      if (!res.ok) {
-        throw new Error(`Media download returned HTTP ${res.status}`);
+      let currentUrl = url;
+      let res: globalThis.Response | null = null;
+      // Follow up to 4 redirects safely, validating every redirect hop against SSRF guard
+      for (let hop = 0; hop < 5; hop++) {
+        res = await fetch(currentUrl, {
+          signal: controller.signal,
+          redirect: 'manual',
+          headers: { 'User-Agent': 'AutoTubeStudio/1.0' },
+        });
+        if (res.status >= 300 && res.status < 400) {
+          const loc = res.headers.get('location');
+          if (!loc) throw new Error('Redirect missing Location header');
+          const nextUrl = new URL(loc, currentUrl).toString();
+          await assertSafeExternalUrlAsync(nextUrl, guardKind === 'user_media' ? 'user_media' : 'user_media');
+          currentUrl = nextUrl;
+          continue;
+        }
+        break;
+      }
+
+      if (!res || !res.ok) {
+        throw new Error(`Media download returned HTTP ${res?.status ?? 0}`);
+      }
+      const ct = (res.headers.get('content-type') || '').toLowerCase();
+      if (ct && !ct.startsWith('image/') && !ct.startsWith('video/') && !ct.includes('octet-stream')) {
+        throw new Error(`Unsupported media content-type: ${ct}`);
       }
       const contentLength = Number(res.headers.get('content-length') || 0);
       if (contentLength > maxBytes) {

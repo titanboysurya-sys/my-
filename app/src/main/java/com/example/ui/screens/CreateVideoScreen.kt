@@ -56,14 +56,18 @@ import com.example.core.database.CachedYouTubeChannelEntity
 import com.example.core.datastore.StudioAppSettings
 import com.example.core.network.CreateProjectRequest
 import com.example.core.network.TopicResearchRequest
+import com.example.ui.components.MediaSourceAndLinksSection
 import com.example.ui.components.StudioSectionHeader
 import com.example.ui.components.StudioTimePickerDialog
+import com.example.ui.components.SubtitleStyleSelectorSection
+import com.example.ui.components.VoiceSelectorSection
 import com.example.ui.components.buildUtcIsoFromLocalDateTime
 import com.example.ui.components.defaultCountryForLanguage
 import com.example.ui.components.format24hTo12hDisplay
 import com.example.ui.components.formatHourMinute24
 import com.example.ui.components.formatIsoToLocalDisplay
 import com.example.ui.components.formatLocalDateSummary
+import com.example.ui.components.parseCustomMediaLinks
 import com.example.ui.theme.PipelineCyan
 import com.example.ui.theme.SignalCrimson
 import com.example.ui.theme.StudioAmber
@@ -110,8 +114,16 @@ fun CreateVideoScreen(
     var selectedTopicType by rememberSaveable { mutableStateOf("evergreen") }
     var selectedQuality by rememberSaveable { mutableStateOf(settings.defaultQuality) }
     var selectedVoiceProvider by rememberSaveable { mutableStateOf(settings.preferredVoiceProvider) }
+    var selectedVoiceId by rememberSaveable { mutableStateOf("Charon") }
+    var selectedVoiceSpeed by rememberSaveable { mutableStateOf(1.0) }
+    var subtitlesEnabled by rememberSaveable { mutableStateOf(true) }
+    var selectedSubtitlePreset by rememberSaveable { mutableStateOf("mrbeast") }
+    var selectedSubtitlePosition by rememberSaveable { mutableStateOf("bottom_safe") }
+    var mediaSourceMode by rememberSaveable { mutableStateOf("all") }
+    var customMediaLinksText by rememberSaveable { mutableStateOf("") }
     var autoProduce by rememberSaveable { mutableStateOf(true) }
     var autoUpload by rememberSaveable { mutableStateOf(false) }
+    var reviewBeforeUpload by rememberSaveable { mutableStateOf(true) }
     var privacyStatus by rememberSaveable { mutableStateOf("private") }
 
     // Target YouTube channel selector (prevents accidental upload to wrong/multiple channels)
@@ -416,21 +428,62 @@ fun CreateVideoScreen(
                             )
                         }
                     }
-
-                    Text("Voice Provider", style = MaterialTheme.typography.titleMedium)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        FilterChip(
-                            selected = selectedVoiceProvider == "gemini_tts",
-                            onClick = { selectedVoiceProvider = "gemini_tts" },
-                            label = { Text("Gemini TTS") }
-                        )
-                        FilterChip(
-                            selected = selectedVoiceProvider == "elevenlabs",
-                            onClick = { selectedVoiceProvider = "elevenlabs" },
-                            label = { Text("ElevenLabs") }
-                        )
-                    }
                 }
+            }
+        }
+
+        // Voice Artist Selector (Male & Female)
+        item {
+            Card(
+                shape = MaterialTheme.shapes.medium,
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+            ) {
+                VoiceSelectorSection(
+                    selectedProvider = selectedVoiceProvider,
+                    selectedVoiceId = selectedVoiceId,
+                    voiceSpeed = selectedVoiceSpeed,
+                    onProviderChange = { selectedVoiceProvider = it },
+                    onVoiceChange = { selectedVoiceId = it },
+                    onSpeedChange = { selectedVoiceSpeed = it },
+                    modifier = Modifier.padding(16.dp)
+                )
+            }
+        }
+
+        // Colorful Viral Subtitle Style Presets (MrBeast, Hormozi, Neon, Gold, Classic)
+        item {
+            Card(
+                shape = MaterialTheme.shapes.medium,
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+            ) {
+                SubtitleStyleSelectorSection(
+                    enabled = subtitlesEnabled,
+                    selectedPreset = selectedSubtitlePreset,
+                    selectedPosition = selectedSubtitlePosition,
+                    onEnabledChange = { subtitlesEnabled = it },
+                    onPresetChange = { selectedSubtitlePreset = it },
+                    onPositionChange = { selectedSubtitlePosition = it },
+                    modifier = Modifier.padding(16.dp)
+                )
+            }
+        }
+
+        // Visual Media Sources & Open-Source Links
+        item {
+            Card(
+                shape = MaterialTheme.shapes.medium,
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+            ) {
+                MediaSourceAndLinksSection(
+                    mediaSourceMode = mediaSourceMode,
+                    customLinksText = customMediaLinksText,
+                    onModeChange = { mediaSourceMode = it },
+                    onCustomLinksChange = { customMediaLinksText = it },
+                    modifier = Modifier.padding(16.dp)
+                )
             }
         }
 
@@ -485,6 +538,29 @@ fun CreateVideoScreen(
                             checked = autoUpload,
                             onCheckedChange = { autoUpload = it },
                             modifier = Modifier.testTag("create_auto_upload_switch")
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Review Video Before YouTube Push", style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                text = if (reviewBeforeUpload)
+                                    "Recommended — pauses after render so you can watch, download, edit voice/subtitles/links, then approve upload"
+                                else
+                                    "Uploads immediately after rendering without waiting for final preview",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = reviewBeforeUpload,
+                            onCheckedChange = { reviewBeforeUpload = it },
+                            modifier = Modifier.testTag("create_review_before_upload_switch")
                         )
                     }
 
@@ -595,6 +671,7 @@ fun CreateVideoScreen(
             Button(
                 onClick = {
                     val effectiveTopic = topic.trim().ifBlank { "auto" }
+                    val customUrls = parseCustomMediaLinks(customMediaLinksText)
                     onGenerateVideo(
                         CreateProjectRequest(
                             title = if (effectiveTopic == "auto") "Auto $selectedNiche Video" else effectiveTopic.take(80),
@@ -609,10 +686,18 @@ fun CreateVideoScreen(
                             qualityPreset = selectedQuality,
                             autoProduce = autoProduce,
                             voiceProvider = selectedVoiceProvider,
+                            voiceId = selectedVoiceId,
+                            voiceSpeed = selectedVoiceSpeed,
+                            subtitlePreset = selectedSubtitlePreset,
+                            subtitlePosition = selectedSubtitlePosition,
+                            subtitlesEnabled = subtitlesEnabled,
                             autoUpload = autoUpload,
+                            reviewBeforeUpload = reviewBeforeUpload,
                             privacyStatus = if (schedulePublishLater) "private" else privacyStatus,
                             scheduledPublishTime = computedPublishAtIso,
                             youtubeAccountId = if (autoUpload) selectedChannelId else null,
+                            mediaSourceMode = mediaSourceMode,
+                            customMediaUrls = customUrls.takeIf { it.isNotEmpty() },
                             startImmediately = true
                         )
                     )

@@ -163,6 +163,41 @@ data class SetDefaultYouTubeRequest(
     val accountId: String
 )
 
+// --- AI Voices Catalog & Live Preview ---
+@JsonClass(generateAdapter = true)
+data class VoiceCatalogItemDto(
+    val id: String,
+    val displayName: String = "",
+    val label: String = "",
+    val gender: String = "male",
+    val tone: String = "",
+    val style: String = "",
+    val geminiVoiceName: String = ""
+)
+
+@JsonClass(generateAdapter = true)
+data class VoicesCatalogResponse(
+    val voices: List<VoiceCatalogItemDto> = emptyList()
+)
+
+@JsonClass(generateAdapter = true)
+data class VoicePreviewRequest(
+    val voiceId: String,
+    val provider: String = "gemini_tts",
+    val language: String = "en",
+    val speed: Double = 1.0,
+    val sampleText: String? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class VoicePreviewResponse(
+    val voiceId: String,
+    val providerUsed: String = "gemini_tts",
+    val mimeType: String = "audio/wav",
+    val audioBase64: String = "",
+    val sampleText: String = ""
+)
+
 // --- Topic Research ---
 @JsonClass(generateAdapter = true)
 data class TopicResearchRequest(

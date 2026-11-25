@@ -53,10 +53,10 @@ import com.example.core.network.CreateProjectRequest
 import com.example.core.network.UpdateScheduleRequest
 import com.example.ui.components.COMMON_TIMEZONES
 import com.example.ui.components.STUDIO_SUBTITLE_PRESETS
-import com.example.ui.components.STUDIO_VOICE_OPTIONS
 import com.example.ui.components.StatusPill
 import com.example.ui.components.StudioSectionHeader
 import com.example.ui.components.StudioTimePickerDialog
+import com.example.ui.components.VoiceSelectorSection
 import com.example.ui.components.defaultCountryForLanguage
 import com.example.ui.components.format24hTo12hDisplay
 import com.example.ui.components.formatHourMinute24
@@ -65,6 +65,7 @@ import com.example.ui.theme.PipelineCyan
 import com.example.ui.theme.SignalCrimson
 import com.example.ui.theme.StudioEmerald
 import com.example.ui.viewmodel.StudioUiState
+import com.example.ui.viewmodel.VoiceSettingsUiState
 import java.util.TimeZone
 
 private data class ChannelAutopilotProfile(
@@ -160,7 +161,11 @@ private fun ChannelAutopilotProfile.toWireMap(): Map<String, Any> = mapOf(
 @Composable
 fun AutomationScreen(
     uiState: StudioUiState,
+    voiceState: VoiceSettingsUiState = VoiceSettingsUiState(),
     channels: List<CachedYouTubeChannelEntity> = emptyList(),
+    onPreviewVoice: (voiceId: String, provider: String, language: String, speed: Double) -> Unit = { _, _, _, _ -> },
+    onStopVoicePreview: () -> Unit = {},
+    onOpenVoiceStudio: () -> Unit = {},
     onSaveSchedule: (UpdateScheduleRequest) -> Unit,
     onToggleAutomation: (Boolean) -> Unit,
     onGenerateNow: (CreateProjectRequest) -> Unit
@@ -725,32 +730,23 @@ fun AutomationScreen(
                 ) {
                     Text("Voice, Subtitles & YouTube Policy", style = MaterialTheme.typography.titleMedium)
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        FilterChip(
-                            selected = voiceProvider == "gemini_tts",
-                            onClick = { voiceProvider = "gemini_tts" },
-                            label = { Text("Gemini TTS") }
-                        )
-                        FilterChip(
-                            selected = voiceProvider == "elevenlabs",
-                            onClick = { voiceProvider = "elevenlabs" },
-                            label = { Text("ElevenLabs") }
-                        )
-                    }
-
-                    Text("Voice Artist (Male & Female)", style = MaterialTheme.typography.titleSmall)
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        STUDIO_VOICE_OPTIONS.forEach { v ->
-                            FilterChip(
-                                selected = voiceId.equals(v.id, ignoreCase = true),
-                                onClick = { voiceId = v.id },
-                                label = { Text("${v.displayName} (${v.badge})") }
-                            )
-                        }
-                    }
+                    VoiceSelectorSection(
+                        selectedProvider = voiceProvider,
+                        selectedVoiceId = voiceId,
+                        voiceSpeed = voiceState.voiceSpeed,
+                        onProviderChange = { voiceProvider = it },
+                        onVoiceChange = { voiceId = it },
+                        onSpeedChange = {},
+                        voices = voiceState.voices,
+                        previewingVoiceId = voiceState.previewingVoiceId,
+                        playingVoiceId = voiceState.playingVoiceId,
+                        previewError = voiceState.previewError,
+                        onPreviewVoice = { vid ->
+                            onPreviewVoice(vid, voiceProvider, language, 1.0)
+                        },
+                        onStopPreview = onStopVoicePreview,
+                        onOpenFullVoiceStudio = onOpenVoiceStudio
+                    )
 
                     Text("Colorful Subtitle Preset", style = MaterialTheme.typography.titleSmall)
                     FlowRow(

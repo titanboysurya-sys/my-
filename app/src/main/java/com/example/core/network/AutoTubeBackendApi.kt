@@ -46,6 +46,13 @@ interface AutoTubeBackendApi {
     @POST("api/youtube/disconnect")
     suspend fun disconnectYouTube(@Body request: YouTubeDisconnectRequest): SimpleStatusResponse
 
+    // AI Voices & Live Preview
+    @GET("api/voices")
+    suspend fun getVoicesCatalog(): VoicesCatalogResponse
+
+    @POST("api/voices/preview")
+    suspend fun previewVoice(@Body request: VoicePreviewRequest): VoicePreviewResponse
+
     // Topic Research & Projects
     @POST("api/research/topics")
     suspend fun researchTopics(@Body request: TopicResearchRequest): TopicResearchResponse

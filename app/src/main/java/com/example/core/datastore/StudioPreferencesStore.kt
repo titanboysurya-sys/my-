@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.doublePreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -29,6 +30,8 @@ data class StudioAppSettings(
     val preferredScriptProvider: String = "gemini",
     val preferredResearchProvider: String = "gemini",
     val preferredVoiceProvider: String = "gemini_tts",
+    val preferredVoiceId: String = "Charon",
+    val preferredVoiceSpeed: Double = 1.0,
     val preferredMediaProviders: String = "pexels,pixabay",
     val lastNotifiedEventId: String = ""
 ) {
@@ -99,6 +102,8 @@ class StudioPreferencesStore(private val context: Context) {
             preferredScriptProvider = prefs[KEY_SCRIPT_PROVIDER] ?: "gemini",
             preferredResearchProvider = prefs[KEY_RESEARCH_PROVIDER] ?: "gemini",
             preferredVoiceProvider = prefs[KEY_VOICE_PROVIDER] ?: "gemini_tts",
+            preferredVoiceId = prefs[KEY_VOICE_ID]?.ifBlank { "Charon" } ?: "Charon",
+            preferredVoiceSpeed = prefs[KEY_VOICE_SPEED] ?: 1.0,
             preferredMediaProviders = prefs[KEY_MEDIA_PROVIDERS] ?: "pexels,pixabay",
             lastNotifiedEventId = prefs[KEY_LAST_NOTIFIED_ID] ?: ""
         )
@@ -152,6 +157,18 @@ class StudioPreferencesStore(private val context: Context) {
         }
     }
 
+    suspend fun updateVoiceDefaults(
+        voiceProvider: String,
+        voiceId: String,
+        voiceSpeed: Double
+    ) {
+        context.studioDataStore.edit { prefs ->
+            prefs[KEY_VOICE_PROVIDER] = voiceProvider
+            prefs[KEY_VOICE_ID] = voiceId
+            prefs[KEY_VOICE_SPEED] = voiceSpeed.coerceIn(0.75, 1.4)
+        }
+    }
+
     suspend fun setLastNotifiedEventId(id: String) {
         context.studioDataStore.edit { prefs ->
             prefs[KEY_LAST_NOTIFIED_ID] = id
@@ -171,6 +188,8 @@ class StudioPreferencesStore(private val context: Context) {
         private val KEY_SCRIPT_PROVIDER = stringPreferencesKey("pref_script_provider")
         private val KEY_RESEARCH_PROVIDER = stringPreferencesKey("pref_research_provider")
         private val KEY_VOICE_PROVIDER = stringPreferencesKey("pref_voice_provider")
+        private val KEY_VOICE_ID = stringPreferencesKey("pref_voice_id")
+        private val KEY_VOICE_SPEED = doublePreferencesKey("pref_voice_speed")
         private val KEY_MEDIA_PROVIDERS = stringPreferencesKey("pref_media_providers")
         private val KEY_LAST_NOTIFIED_ID = stringPreferencesKey("last_notified_event_id")
     }

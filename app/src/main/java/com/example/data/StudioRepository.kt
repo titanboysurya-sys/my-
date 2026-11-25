@@ -33,6 +33,9 @@ import com.example.core.network.UpdateScheduleRequest
 import com.example.core.network.UpdateScriptRequest
 import com.example.core.network.ValidateCredentialResponse
 import com.example.core.network.VideoJobDto
+import com.example.core.network.VoiceCatalogItemDto
+import com.example.core.network.VoicePreviewRequest
+import com.example.core.network.VoicePreviewResponse
 import com.example.core.network.SetDefaultYouTubeRequest
 import com.example.core.network.YouTubeDisconnectRequest
 import com.example.core.security.AuthSession
@@ -142,6 +145,37 @@ class StudioRepository(
             else -> current.preferredMediaProviders
         }
         prefsStore.updateProviderRouting(script, research, voice, media)
+        val savedVoiceId = (prefs["voice_id"] as? String)?.takeIf { it.isNotBlank() } ?: current.preferredVoiceId
+        val savedVoiceSpeed = (prefs["voice_speed"] as? Number)?.toDouble() ?: current.preferredVoiceSpeed
+        prefsStore.updateVoiceDefaults(voice, savedVoiceId, savedVoiceSpeed)
+    }
+
+    suspend fun getVoicesCatalog(): Result<List<VoiceCatalogItemDto>> = safeApiCall {
+        client.backendApi().getVoicesCatalog().voices
+    }
+
+    suspend fun previewVoice(request: VoicePreviewRequest): Result<VoicePreviewResponse> = safeApiCall {
+        client.backendApi().previewVoice(request)
+    }
+
+    suspend fun updateVoiceDefaults(
+        voiceProvider: String,
+        voiceId: String,
+        voiceSpeed: Double
+    ): Result<Unit> {
+        prefsStore.updateVoiceDefaults(voiceProvider, voiceId, voiceSpeed)
+        return safeApiCall {
+            client.backendApi().updateProfilePreferences(
+                ProfilePreferencesRequest(
+                    preferences = mapOf(
+                        "voice_provider" to voiceProvider,
+                        "voice_id" to voiceId,
+                        "voice_speed" to voiceSpeed
+                    )
+                )
+            )
+            Unit
+        }
     }
 
     suspend fun checkBackendHealth(overrideUrl: String? = null): Result<HealthResponse> =

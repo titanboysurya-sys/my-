@@ -101,6 +101,7 @@ import com.example.ui.theme.SignalCrimson
 import com.example.ui.theme.StudioAmber
 import com.example.ui.theme.StudioEmerald
 import com.example.ui.viewmodel.StudioUiState
+import com.example.ui.viewmodel.VoiceSettingsUiState
 import java.util.Calendar
 import java.util.TimeZone
 
@@ -109,6 +110,7 @@ import java.util.TimeZone
 fun ProjectDetailScreen(
     projectId: String,
     uiState: StudioUiState,
+    voiceState: VoiceSettingsUiState = VoiceSettingsUiState(),
     channels: List<CachedYouTubeChannelEntity> = emptyList(),
     onLoadDetail: (String) -> Unit,
     onSaveScript: (projectId: String, narration: String, titleIdea: String?, approveAndContinue: Boolean) -> Unit,
@@ -119,6 +121,9 @@ fun ProjectDetailScreen(
         rerenderRequest: RerenderProjectRequest?
     ) -> Unit,
     onPublishProject: (projectId: String, request: PublishProjectRequest) -> Unit,
+    onPreviewVoice: (voiceId: String, provider: String, language: String, speed: Double) -> Unit = { _, _, _, _ -> },
+    onStopVoicePreview: () -> Unit = {},
+    onOpenVoiceStudio: () -> Unit = {},
     onNotifyUser: (message: String, isError: Boolean) -> Unit,
     onOpenJobDetail: (String) -> Unit,
     onDeleteProject: (String) -> Unit,
@@ -726,7 +731,16 @@ fun ProjectDetailScreen(
                                 onSpeedChange = {
                                     editVoiceSpeed = it
                                     regenerateVoiceOnRerender = true
-                                }
+                                },
+                                voices = voiceState.voices,
+                                previewingVoiceId = voiceState.previewingVoiceId,
+                                playingVoiceId = voiceState.playingVoiceId,
+                                previewError = voiceState.previewError,
+                                onPreviewVoice = { vid ->
+                                    onPreviewVoice(vid, editVoiceProvider, project.language, editVoiceSpeed)
+                                },
+                                onStopPreview = onStopVoicePreview,
+                                onOpenFullVoiceStudio = onOpenVoiceStudio
                             )
 
                             HorizontalDivider()

@@ -72,6 +72,7 @@ import com.example.ui.theme.PipelineCyan
 import com.example.ui.theme.SignalCrimson
 import com.example.ui.theme.StudioAmber
 import com.example.ui.viewmodel.StudioUiState
+import com.example.ui.viewmodel.VoiceSettingsUiState
 import java.util.Calendar
 import java.util.TimeZone
 
@@ -101,8 +102,15 @@ val STUDIO_CONTENT_STYLES = listOf(
 fun CreateVideoScreen(
     settings: StudioAppSettings,
     uiState: StudioUiState,
+    voiceState: VoiceSettingsUiState,
     channels: List<CachedYouTubeChannelEntity> = emptyList(),
     onResearchTopics: (TopicResearchRequest) -> Unit,
+    onSelectVoice: (String) -> Unit,
+    onSetVoiceProvider: (String) -> Unit,
+    onSetVoiceSpeed: (Double) -> Unit,
+    onPreviewVoice: (voiceId: String, provider: String, language: String, speed: Double) -> Unit,
+    onStopVoicePreview: () -> Unit,
+    onOpenVoiceStudio: () -> Unit,
     onGenerateVideo: (CreateProjectRequest) -> Unit
 ) {
     var topic by rememberSaveable { mutableStateOf("") }
@@ -113,9 +121,6 @@ fun CreateVideoScreen(
     var selectedStyle by rememberSaveable { mutableStateOf("documentary") }
     var selectedTopicType by rememberSaveable { mutableStateOf("evergreen") }
     var selectedQuality by rememberSaveable { mutableStateOf(settings.defaultQuality) }
-    var selectedVoiceProvider by rememberSaveable { mutableStateOf(settings.preferredVoiceProvider) }
-    var selectedVoiceId by rememberSaveable { mutableStateOf("Charon") }
-    var selectedVoiceSpeed by rememberSaveable { mutableStateOf(1.0) }
     var subtitlesEnabled by rememberSaveable { mutableStateOf(true) }
     var selectedSubtitlePreset by rememberSaveable { mutableStateOf("mrbeast") }
     var selectedSubtitlePosition by rememberSaveable { mutableStateOf("bottom_safe") }
@@ -432,7 +437,7 @@ fun CreateVideoScreen(
             }
         }
 
-        // Voice Artist Selector (Male & Female)
+        // Voice Artist Selector (All 30 Official Male & Female Voices + Live Audio Preview)
         item {
             Card(
                 shape = MaterialTheme.shapes.medium,
@@ -440,12 +445,21 @@ fun CreateVideoScreen(
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
             ) {
                 VoiceSelectorSection(
-                    selectedProvider = selectedVoiceProvider,
-                    selectedVoiceId = selectedVoiceId,
-                    voiceSpeed = selectedVoiceSpeed,
-                    onProviderChange = { selectedVoiceProvider = it },
-                    onVoiceChange = { selectedVoiceId = it },
-                    onSpeedChange = { selectedVoiceSpeed = it },
+                    selectedProvider = voiceState.selectedProvider,
+                    selectedVoiceId = voiceState.selectedVoiceId,
+                    voiceSpeed = voiceState.voiceSpeed,
+                    onProviderChange = onSetVoiceProvider,
+                    onVoiceChange = onSelectVoice,
+                    onSpeedChange = onSetVoiceSpeed,
+                    voices = voiceState.voices,
+                    previewingVoiceId = voiceState.previewingVoiceId,
+                    playingVoiceId = voiceState.playingVoiceId,
+                    previewError = voiceState.previewError,
+                    onPreviewVoice = { vid ->
+                        onPreviewVoice(vid, voiceState.selectedProvider, selectedLanguage, voiceState.voiceSpeed)
+                    },
+                    onStopPreview = onStopVoicePreview,
+                    onOpenFullVoiceStudio = onOpenVoiceStudio,
                     modifier = Modifier.padding(16.dp)
                 )
             }
@@ -685,9 +699,9 @@ fun CreateVideoScreen(
                             durationSeconds = selectedDuration,
                             qualityPreset = selectedQuality,
                             autoProduce = autoProduce,
-                            voiceProvider = selectedVoiceProvider,
-                            voiceId = selectedVoiceId,
-                            voiceSpeed = selectedVoiceSpeed,
+                            voiceProvider = voiceState.selectedProvider,
+                            voiceId = voiceState.selectedVoiceId,
+                            voiceSpeed = voiceState.voiceSpeed,
                             subtitlePreset = selectedSubtitlePreset,
                             subtitlePosition = selectedSubtitlePosition,
                             subtitlesEnabled = subtitlesEnabled,

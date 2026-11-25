@@ -18,81 +18,322 @@ export type VoiceProviderName = 'gemini_tts' | 'elevenlabs';
 
 export interface StudioVoiceProfile {
   id: string;
+  displayName: string;
   label: string;
   gender: 'male' | 'female';
+  tone: string;
   style: string;
   geminiVoiceName: string;
   elevenLabsVoiceId: string;
 }
 
 /**
- * Curated multi-gender studio voice catalog mapped to real Gemini TTS prebuilt voices
- * and distinct ElevenLabs premade voice IDs so user voice choice works across both providers.
+ * Full 30-voice official Gemini TTS prebuilt catalog (16 Male + 14 Female) mapped to
+ * distinct ElevenLabs premade voice IDs so every voice works seamlessly on both providers.
  */
 export const STUDIO_VOICE_CATALOG: StudioVoiceProfile[] = [
+  // --- MALE VOICES (16) ---
   {
     id: 'Charon',
-    label: 'Charon (Male • Deep Documentary)',
+    displayName: 'Charon',
+    label: 'Charon (Male • Informative Documentary)',
     gender: 'male',
-    style: 'deep authoritative documentary narration',
+    tone: 'Informative & Deep Documentary',
+    style: 'deep authoritative informative documentary narration',
     geminiVoiceName: 'Charon',
-    elevenLabsVoiceId: 'pNInz6obpgDQGcFmaJgB', // Adam (Deep Male)
+    elevenLabsVoiceId: 'pNInz6obpgDQGcFmaJgB', // Adam
   },
   {
     id: 'Fenrir',
-    label: 'Fenrir (Male • Bold Viral Energy)',
+    displayName: 'Fenrir',
+    label: 'Fenrir (Male • Excitable Viral Energy)',
     gender: 'male',
-    style: 'energetic punchy high-retention storytelling',
+    tone: 'Excitable & High Energy',
+    style: 'energetic excitable punchy high-retention storytelling',
     geminiVoiceName: 'Fenrir',
-    elevenLabsVoiceId: 'TxGEqnHWrfWFTfGW9XjX', // Josh (Energetic Male)
+    elevenLabsVoiceId: 'TxGEqnHWrfWFTfGW9XjX', // Josh
   },
   {
     id: 'Puck',
-    label: 'Puck (Male • Friendly & Upbeat)',
+    displayName: 'Puck',
+    label: 'Puck (Male • Upbeat & Viral)',
     gender: 'male',
-    style: 'friendly upbeat conversational storytelling',
+    tone: 'Upbeat & Conversational',
+    style: 'friendly upbeat lively conversational storytelling',
     geminiVoiceName: 'Puck',
-    elevenLabsVoiceId: 'ErXwobaYiN019PkySvjV', // Antoni (Warm Male)
+    elevenLabsVoiceId: 'ErXwobaYiN019PkySvjV', // Antoni
   },
   {
     id: 'Orus',
-    label: 'Orus (Male • Crisp News Anchor)',
+    displayName: 'Orus',
+    label: 'Orus (Male • Firm News Anchor)',
     gender: 'male',
-    style: 'clear confident broadcast anchor delivery',
+    tone: 'Firm & Crisp Broadcast',
+    style: 'clear firm confident broadcast news anchor delivery',
     geminiVoiceName: 'Orus',
-    elevenLabsVoiceId: 'VR6AewLTigWG4xSOukaG', // Arnold (Crisp Male)
+    elevenLabsVoiceId: 'VR6AewLTigWG4xSOukaG', // Arnold
   },
   {
+    id: 'Enceladus',
+    displayName: 'Enceladus',
+    label: 'Enceladus (Male • Breathy Cinematic)',
+    gender: 'male',
+    tone: 'Breathy & Cinematic',
+    style: 'cinematic breathy atmospheric dramatic narration',
+    geminiVoiceName: 'Enceladus',
+    elevenLabsVoiceId: 'yoZ06aMxZJJ28mfd3POQ', // Sam
+  },
+  {
+    id: 'Iapetus',
+    displayName: 'Iapetus',
+    label: 'Iapetus (Male • Clear Educator)',
+    gender: 'male',
+    tone: 'Clear & Articulated',
+    style: 'clear well-paced educational explainer narration',
+    geminiVoiceName: 'Iapetus',
+    elevenLabsVoiceId: 'onwK4e9ZLuTAKqWW03F9', // Daniel
+  },
+  {
+    id: 'Umbriel',
+    displayName: 'Umbriel',
+    label: 'Umbriel (Male • Easy-Going Calm)',
+    gender: 'male',
+    tone: 'Easy-Going & Calm',
+    style: 'relaxed calm easy-going thoughtful storytelling',
+    geminiVoiceName: 'Umbriel',
+    elevenLabsVoiceId: 'N2lVS1w4EtoT3dr4eOWO', // Callum
+  },
+  {
+    id: 'Algieba',
+    displayName: 'Algieba',
+    label: 'Algieba (Male • Smooth & Polished)',
+    gender: 'male',
+    tone: 'Smooth & Studio Polished',
+    style: 'smooth velvety studio commercial narration',
+    geminiVoiceName: 'Algieba',
+    elevenLabsVoiceId: 'pqHfZKP75CvOlQylNhV4', // Bill
+  },
+  {
+    id: 'Algenib',
+    displayName: 'Algenib',
+    label: 'Algenib (Male • Gravelly Dramatic)',
+    gender: 'male',
+    tone: 'Gravelly & Intense',
+    style: 'gravelly deep dramatic thriller narration',
+    geminiVoiceName: 'Algenib',
+    elevenLabsVoiceId: 'flq6f7yk4E4fJM5XTYuZ', // Michael
+  },
+  {
+    id: 'Rasalgethi',
+    displayName: 'Rasalgethi',
+    label: 'Rasalgethi (Male • Informative Analyst)',
+    gender: 'male',
+    tone: 'Informative & Analytical',
+    style: 'sharp informative tech and finance analyst delivery',
+    geminiVoiceName: 'Rasalgethi',
+    elevenLabsVoiceId: 'IKne3meq5aSn9XLyUdCD', // Charlie
+  },
+  {
+    id: 'Alnilam',
+    displayName: 'Alnilam',
+    label: 'Alnilam (Male • Firm & Command)',
+    gender: 'male',
+    tone: 'Firm & Commanding',
+    style: 'firm steady authoritative leadership narration',
+    geminiVoiceName: 'Alnilam',
+    elevenLabsVoiceId: 'SOYHLrjzK2X1ezoPC6cr', // Harry
+  },
+  {
+    id: 'Schedar',
+    displayName: 'Schedar',
+    label: 'Schedar (Male • Even & Balanced)',
+    gender: 'male',
+    tone: 'Even & Balanced',
+    style: 'even-toned balanced steady documentary voice',
+    geminiVoiceName: 'Schedar',
+    elevenLabsVoiceId: 'TX3LPaxmHKxFdv7VOQHJ', // Liam
+  },
+  {
+    id: 'Achird',
+    displayName: 'Achird',
+    label: 'Achird (Male • Friendly Guide)',
+    gender: 'male',
+    tone: 'Friendly & Approachable',
+    style: 'warm friendly relatable YouTube creator voice',
+    geminiVoiceName: 'Achird',
+    elevenLabsVoiceId: 'bIHbv24MWmeRgasZH58o', // Will
+  },
+  {
+    id: 'Zubenelgenubi',
+    displayName: 'Zubenelgenubi',
+    label: 'Zubenelgenubi (Male • Casual Podcast)',
+    gender: 'male',
+    tone: 'Casual & Podcast Host',
+    style: 'natural casual podcast host conversational tone',
+    geminiVoiceName: 'Zubenelgenubi',
+    elevenLabsVoiceId: 'cjVigY5qzO86Huf0OWal', // Eric
+  },
+  {
+    id: 'Sadachbia',
+    displayName: 'Sadachbia',
+    label: 'Sadachbia (Male • Lively & Dynamic)',
+    gender: 'male',
+    tone: 'Lively & Dynamic',
+    style: 'lively animated fast-paced viral creator tone',
+    geminiVoiceName: 'Sadachbia',
+    elevenLabsVoiceId: 'iP95p4xoKVk53GoZ742B', // Chris
+  },
+  {
+    id: 'Sadaltager',
+    displayName: 'Sadaltager',
+    label: 'Sadaltager (Male • Knowledgeable Host)',
+    gender: 'male',
+    tone: 'Knowledgeable & Trusted',
+    style: 'knowledgeable articulate science and history host',
+    geminiVoiceName: 'Sadaltager',
+    elevenLabsVoiceId: 'nPczCjzI2devNBz1zQrb', // Brian
+  },
+
+  // --- FEMALE VOICES (14) ---
+  {
     id: 'Kore',
-    label: 'Kore (Female • Clear & Firm)',
+    displayName: 'Kore',
+    label: 'Kore (Female • Firm & Clear)',
     gender: 'female',
-    style: 'clear confident studio narration',
+    tone: 'Firm & Clear Narrator',
+    style: 'clear firm confident studio narration',
     geminiVoiceName: 'Kore',
-    elevenLabsVoiceId: '21m00Tcm4TlvDq8ikWAM', // Rachel (Clear Female)
+    elevenLabsVoiceId: '21m00Tcm4TlvDq8ikWAM', // Rachel
   },
   {
     id: 'Aoede',
-    label: 'Aoede (Female • Warm Storyteller)',
+    displayName: 'Aoede',
+    label: 'Aoede (Female • Breezy Storyteller)',
     gender: 'female',
-    style: 'warm expressive natural storytelling',
+    tone: 'Breezy & Warm Storyteller',
+    style: 'warm breezy expressive natural storytelling',
     geminiVoiceName: 'Aoede',
-    elevenLabsVoiceId: 'EXAVITQu4vr4xnSDxMaL', // Bella (Warm Female)
+    elevenLabsVoiceId: 'EXAVITQu4vr4xnSDxMaL', // Bella
   },
   {
     id: 'Leda',
+    displayName: 'Leda',
     label: 'Leda (Female • Youthful Shorts)',
     gender: 'female',
-    style: 'youthful lively engaging delivery',
+    tone: 'Youthful & Lively',
+    style: 'youthful lively engaging short-form delivery',
     geminiVoiceName: 'Leda',
-    elevenLabsVoiceId: 'MF3mGyEYCl7XYWbV9V6O', // Elli (Youthful Female)
+    elevenLabsVoiceId: 'MF3mGyEYCl7XYWbV9V6O', // Elli
   },
   {
     id: 'Zephyr',
+    displayName: 'Zephyr',
     label: 'Zephyr (Female • Bright & Smooth)',
     gender: 'female',
-    style: 'bright modern explainer delivery',
+    tone: 'Bright & Modern',
+    style: 'bright modern smooth explainer delivery',
     geminiVoiceName: 'Zephyr',
-    elevenLabsVoiceId: 'AZnzlk1XvdvUeBnXmlld', // Domi (Bright Female)
+    elevenLabsVoiceId: 'AZnzlk1XvdvUeBnXmlld', // Domi
+  },
+  {
+    id: 'Callirrhoe',
+    displayName: 'Callirrhoe',
+    label: 'Callirrhoe (Female • Easy-Going)',
+    gender: 'female',
+    tone: 'Easy-Going & Natural',
+    style: 'easy-going warm conversational lifestyle voice',
+    geminiVoiceName: 'Callirrhoe',
+    elevenLabsVoiceId: 'ThT5KcBeYPX3keUQqHPh', // Dorothy
+  },
+  {
+    id: 'Autonoe',
+    displayName: 'Autonoe',
+    label: 'Autonoe (Female • Bright Explainer)',
+    gender: 'female',
+    tone: 'Bright & Energetic',
+    style: 'bright clear enthusiastic educational presenter',
+    geminiVoiceName: 'Autonoe',
+    elevenLabsVoiceId: 'jBpfuIE2acCO8z3wKNLl', // Gigi
+  },
+  {
+    id: 'Despina',
+    displayName: 'Despina',
+    label: 'Despina (Female • Smooth Luxury)',
+    gender: 'female',
+    tone: 'Smooth & Refined',
+    style: 'smooth refined luxury brand and travel narration',
+    geminiVoiceName: 'Despina',
+    elevenLabsVoiceId: 'oWAxZDx7w5VEj9dCyTzz', // Grace
+  },
+  {
+    id: 'Erinome',
+    displayName: 'Erinome',
+    label: 'Erinome (Female • Clear & Crisp)',
+    gender: 'female',
+    tone: 'Clear & Studio Crisp',
+    style: 'crisp articulate news and documentary narration',
+    geminiVoiceName: 'Erinome',
+    elevenLabsVoiceId: 'XB0fDUnXU5powFXDhCwa', // Charlotte
+  },
+  {
+    id: 'Laomedeia',
+    displayName: 'Laomedeia',
+    label: 'Laomedeia (Female • Upbeat Motivational)',
+    gender: 'female',
+    tone: 'Upbeat & Motivational',
+    style: 'upbeat inspiring energetic motivational delivery',
+    geminiVoiceName: 'Laomedeia',
+    elevenLabsVoiceId: 'jsCqWAovK2LkecY7zXl4', // Freya
+  },
+  {
+    id: 'Achernar',
+    displayName: 'Achernar',
+    label: 'Achernar (Female • Soft & Gentle)',
+    gender: 'female',
+    tone: 'Soft & Soothing',
+    style: 'soft gentle calming bedtime and mindfulness voice',
+    geminiVoiceName: 'Achernar',
+    elevenLabsVoiceId: 'LcfcDJNUP1GQjkzn1xUU', // Emily
+  },
+  {
+    id: 'Gacrux',
+    displayName: 'Gacrux',
+    label: 'Gacrux (Female • Mature & Authoritative)',
+    gender: 'female',
+    tone: 'Mature & Authoritative',
+    style: 'mature poised authoritative documentary narrator',
+    geminiVoiceName: 'Gacrux',
+    elevenLabsVoiceId: 'XrExE9yKIg1WjnnlVkGX', // Matilda
+  },
+  {
+    id: 'Pulcherrima',
+    displayName: 'Pulcherrima',
+    label: 'Pulcherrima (Female • Forward & Bold)',
+    gender: 'female',
+    tone: 'Forward & Confident',
+    style: 'bold forward confident commentary and creator delivery',
+    geminiVoiceName: 'Pulcherrima',
+    elevenLabsVoiceId: 'pFZP5JQG7iQjIQuC4Bku', // Lily
+  },
+  {
+    id: 'Vindemiatrix',
+    displayName: 'Vindemiatrix',
+    label: 'Vindemiatrix (Female • Gentle & Poised)',
+    gender: 'female',
+    tone: 'Gentle & Poised',
+    style: 'gentle poised calm narrative storytelling',
+    geminiVoiceName: 'Vindemiatrix',
+    elevenLabsVoiceId: 'z9fAnlkpzviPz146aGWa', // Glinda
+  },
+  {
+    id: 'Sulafat',
+    displayName: 'Sulafat',
+    label: 'Sulafat (Female • Warm & Engaging)',
+    gender: 'female',
+    tone: 'Warm & Engaging',
+    style: 'warm deeply engaging heartfelt human storytelling',
+    geminiVoiceName: 'Sulafat',
+    elevenLabsVoiceId: 'cgSgspJ2msm6clMCkdW9', // Jessica
   },
 ];
 
@@ -108,10 +349,126 @@ export function resolveStudioVoiceProfile(voiceId?: string): StudioVoiceProfile 
     return {
       ...STUDIO_VOICE_CATALOG[0],
       id: raw,
+      displayName: raw,
       elevenLabsVoiceId: raw,
     };
   }
   return STUDIO_VOICE_CATALOG[0];
+}
+
+export function defaultPreviewSampleText(language: string, voiceName: string): string {
+  switch ((language || 'en').trim().toLowerCase()) {
+    case 'hi':
+      return `नमस्ते! मैं ${voiceName} हूँ। आपके अगले वायरल यूट्यूब वीडियो की आवाज़ बिल्कुल ऐसी सुनाई देगी।`;
+    case 'hinglish':
+      return `Namaste! Main ${voiceName} hoon. Aapke agle YouTube video ka voiceover bilkul aisa sunai dega.`;
+    case 'es':
+      return `Hola, soy ${voiceName}. Así sonará la narración de tu próximo video de YouTube.`;
+    case 'fr':
+      return `Bonjour, je suis ${voiceName}. Voici à quoi ressemblera la voix de votre prochaine vidéo.`;
+    case 'de':
+      return `Hallo, ich bin ${voiceName}. Genau so klingt die Stimme für dein nächstes YouTube-Video.`;
+    case 'ja':
+      return `こんにちは、${voiceName}です。次の動画のナレーションはこのような声になります。`;
+    case 'pt':
+      return `Olá, eu sou ${voiceName}. É assim que a narração do seu próximo vídeo vai soar.`;
+    default:
+      return `Hello! I'm ${voiceName}. This is how your next YouTube video narration will sound.`;
+  }
+}
+
+export interface VoicePreviewRequest {
+  userId: string;
+  preferredProvider: VoiceProviderName;
+  voiceId: string;
+  language: string;
+  speed: number;
+  sampleText?: string;
+}
+
+export interface VoicePreviewResult {
+  voiceId: string;
+  providerUsed: VoiceProviderName;
+  mimeType: string;
+  audioBase64: string;
+  sampleText: string;
+}
+
+interface CachedPreviewEntry {
+  result: VoicePreviewResult;
+  expiresAt: number;
+}
+
+const previewCache = new Map<string, CachedPreviewEntry>();
+const PREVIEW_CACHE_TTL_MS = 15 * 60 * 1000;
+const PREVIEW_CACHE_MAX = 60;
+
+/**
+ * Generates a short live voice preview audio clip (in-memory, zero storage clutter)
+ * so users can audition all 30 studio voices before generating their video.
+ */
+export async function synthesizeVoicePreview(
+  req: VoicePreviewRequest
+): Promise<VoicePreviewResult> {
+  const profile = resolveStudioVoiceProfile(req.voiceId);
+  const speed = Math.max(0.75, Math.min(1.4, Number(req.speed || 1.0)));
+  const language = (req.language || 'en').trim().toLowerCase();
+  const sampleText = (req.sampleText || '').trim().slice(0, 180) ||
+    defaultPreviewSampleText(language, profile.displayName);
+
+  const cacheKey = `${req.userId}:${req.preferredProvider}:${profile.id}:${language}:${speed.toFixed(2)}:${sampleText}`;
+  const now = Date.now();
+  const cached = previewCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) {
+    return cached.result;
+  }
+
+  const providerOrder: VoiceProviderName[] =
+    req.preferredProvider === 'elevenlabs'
+      ? ['elevenlabs', 'gemini_tts']
+      : ['gemini_tts', 'elevenlabs'];
+
+  const synthReq: VoiceSynthesisRequest = {
+    userId: req.userId,
+    projectId: 'preview',
+    text: sampleText,
+    language,
+    preferredProvider: req.preferredProvider,
+    voiceId: profile.id,
+    speed,
+    workDir: '',
+  };
+
+  const errors: string[] = [];
+  for (const provider of providerOrder) {
+    try {
+      const audio =
+        provider === 'elevenlabs'
+          ? await generateWithElevenLabs(synthReq)
+          : await generateWithGeminiTts(synthReq);
+
+      const result: VoicePreviewResult = {
+        voiceId: profile.id,
+        providerUsed: provider,
+        mimeType: audio.mimeType,
+        audioBase64: audio.buffer.toString('base64'),
+        sampleText,
+      };
+
+      if (previewCache.size >= PREVIEW_CACHE_MAX) {
+        const oldestKey = previewCache.keys().next().value;
+        if (oldestKey) previewCache.delete(oldestKey);
+      }
+      previewCache.set(cacheKey, { result, expiresAt: now + PREVIEW_CACHE_TTL_MS });
+      return result;
+    } catch (err) {
+      errors.push(`${provider}: ${sanitizeErrorMessage(err)}`);
+    }
+  }
+
+  throw new Error(
+    `Voice preview failed. Ensure your Gemini or ElevenLabs API key is connected (${errors.join(' | ')})`
+  );
 }
 
 export interface VoiceSynthesisRequest {

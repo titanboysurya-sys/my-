@@ -24,6 +24,7 @@ import {
 } from '../src/services/modelResolver.js';
 import { scoreMediaCandidate, type MediaCandidate } from '../src/services/mediaSearchService.js';
 import {
+  defaultPreviewSampleText,
   resolveStudioVoiceProfile,
   STUDIO_VOICE_CATALOG,
   wrapPcm16AsWav,
@@ -368,24 +369,45 @@ test('Live model resolver skips retired/non-chat models and automatically adopts
   assert.equal(isModelRetiredOrUnsupportedError(429, 'Rate limit exceeded'), false);
 });
 
-test('Studio voice catalog exposes male and female voices mapped to both Gemini TTS and ElevenLabs', () => {
+test('Studio voice catalog exposes all 30 official voices (16 male, 14 female) with localized preview samples', () => {
   const males = STUDIO_VOICE_CATALOG.filter((v) => v.gender === 'male');
   const females = STUDIO_VOICE_CATALOG.filter((v) => v.gender === 'female');
-  assert.ok(males.length >= 4);
-  assert.ok(females.length >= 4);
+  const uniqueIds = new Set(STUDIO_VOICE_CATALOG.map((v) => v.id));
+
+  assert.equal(STUDIO_VOICE_CATALOG.length, 30);
+  assert.equal(uniqueIds.size, 30);
+  assert.equal(males.length, 16);
+  assert.equal(females.length, 14);
 
   const charon = resolveStudioVoiceProfile('Charon');
   assert.equal(charon.gender, 'male');
   assert.equal(charon.geminiVoiceName, 'Charon');
   assert.ok(charon.elevenLabsVoiceId.length >= 15);
 
-  const kore = resolveStudioVoiceProfile('kore');
-  assert.equal(kore.gender, 'female');
-  assert.notEqual(kore.elevenLabsVoiceId, charon.elevenLabsVoiceId);
+  const enceladus = resolveStudioVoiceProfile('Enceladus');
+  assert.equal(enceladus.gender, 'male');
+  assert.equal(enceladus.geminiVoiceName, 'Enceladus');
+
+  const sulafat = resolveStudioVoiceProfile('sulafat');
+  assert.equal(sulafat.gender, 'female');
+  assert.equal(sulafat.geminiVoiceName, 'Sulafat');
+  assert.notEqual(sulafat.elevenLabsVoiceId, charon.elevenLabsVoiceId);
 
   // Custom raw ElevenLabs voice IDs are preserved verbatim
   const custom = resolveStudioVoiceProfile('CustomVoiceId123456789');
   assert.equal(custom.elevenLabsVoiceId, 'CustomVoiceId123456789');
+
+  // Preview sample text localizes cleanly for Hindi, Hinglish, and English
+  const hiSample = defaultPreviewSampleText('hi', 'Charon');
+  assert.ok(hiSample.includes('Charon'));
+  assert.ok(hiSample.includes('नमस्ते'));
+
+  const hinglishSample = defaultPreviewSampleText('hinglish', 'Sulafat');
+  assert.ok(hinglishSample.includes('Sulafat'));
+  assert.ok(hinglishSample.toLowerCase().includes('namaste'));
+
+  const enSample = defaultPreviewSampleText('en', 'Fenrir');
+  assert.ok(enSample.includes('Fenrir'));
 });
 
 test('Colorful viral subtitle presets emit word-by-word ASS color pop and preserve Devanagari Hindi text', () => {

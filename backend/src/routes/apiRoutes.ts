@@ -35,6 +35,10 @@ import {
   listUserYouTubeAccounts,
   setDefaultYouTubeAccount,
 } from '../services/youtubeService.js';
+import {
+  STUDIO_VOICE_CATALOG,
+  synthesizeVoicePreview,
+} from '../services/voiceService.js';
 
 export const apiRouter = Router();
 
@@ -446,6 +450,51 @@ apiRouter.post('/youtube/disconnect', async (req: AuthenticatedRequest, res: Res
     res.json({ disconnected: true });
   } catch (err) {
     res.status(500).json({ error: sanitizeErrorMessage(err) });
+  }
+});
+
+// ============================================================================
+// AI VOICES CATALOG (30 OFFICIAL VOICES) & LIVE AUDIO PREVIEW
+// ============================================================================
+apiRouter.get('/voices', async (_req: AuthenticatedRequest, res: Response) => {
+  res.json({
+    voices: STUDIO_VOICE_CATALOG.map((v) => ({
+      id: v.id,
+      displayName: v.displayName,
+      label: v.label,
+      gender: v.gender,
+      tone: v.tone,
+      style: v.style,
+      geminiVoiceName: v.geminiVoiceName,
+    })),
+  });
+});
+
+apiRouter.post('/voices/preview', sensitiveRateLimiter, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const userId = getAuthUserId(req);
+    const body = z
+      .object({
+        voiceId: z.string().min(1).max(64).default('Charon'),
+        provider: z.enum(['gemini_tts', 'elevenlabs']).default('gemini_tts'),
+        language: z.string().min(2).max(16).default('en'),
+        speed: z.number().min(0.75).max(1.4).default(1.0),
+        sampleText: z.string().max(180).optional(),
+      })
+      .parse(req.body || {});
+
+    const preview = await synthesizeVoicePreview({
+      userId,
+      preferredProvider: body.provider,
+      voiceId: body.voiceId,
+      language: body.language,
+      speed: body.speed,
+      sampleText: body.sampleText,
+    });
+
+    res.json(preview);
+  } catch (err) {
+    res.status(400).json({ error: sanitizeErrorMessage(err) });
   }
 });
 

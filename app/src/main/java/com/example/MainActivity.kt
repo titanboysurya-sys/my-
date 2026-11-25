@@ -62,9 +62,11 @@ import com.example.ui.screens.ProjectDetailScreen
 import com.example.ui.screens.ProjectsScreen
 import com.example.ui.screens.SettingsScreen
 import com.example.ui.screens.ProviderStatusScreen
+import com.example.ui.screens.VoiceSettingsScreen
 import com.example.ui.screens.YouTubeSettingsScreen
 import com.example.ui.theme.AutoTubeStudioTheme
 import com.example.ui.viewmodel.StudioViewModel
+import com.example.ui.viewmodel.VoiceSettingsViewModel
 
 object StudioRoutes {
     const val DASHBOARD = "dashboard"
@@ -75,6 +77,7 @@ object StudioRoutes {
     const val API_KEYS = "api_keys"
     const val YOUTUBE_SETTINGS = "youtube_settings"
     const val PROVIDER_STATUS = "provider_status"
+    const val VOICE_SETTINGS = "voice_settings"
     const val PROJECT_DETAIL = "project_detail/{projectId}"
     const val JOB_DETAIL = "job_detail/{jobId}"
 
@@ -104,6 +107,11 @@ class MainActivity : ComponentActivity() {
         StudioViewModel.Factory(app.container.repository)
     }
 
+    private val voiceSettingsViewModel: VoiceSettingsViewModel by viewModels {
+        val app = application as AutoTubeApplication
+        VoiceSettingsViewModel.Factory(app, app.container.repository)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -112,7 +120,10 @@ class MainActivity : ComponentActivity() {
         setContent {
             val settings by viewModel.appSettings.collectAsStateWithLifecycle()
             AutoTubeStudioTheme(darkTheme = settings.darkTheme) {
-                AutoTubeStudioRoot(viewModel = viewModel)
+                AutoTubeStudioRoot(
+                    viewModel = viewModel,
+                    voiceSettingsViewModel = voiceSettingsViewModel
+                )
             }
         }
     }
@@ -142,11 +153,15 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun AutoTubeStudioRoot(viewModel: StudioViewModel) {
+private fun AutoTubeStudioRoot(
+    viewModel: StudioViewModel,
+    voiceSettingsViewModel: VoiceSettingsViewModel
+) {
     val context = LocalContext.current
     val session by viewModel.authSession.collectAsStateWithLifecycle()
     val settings by viewModel.appSettings.collectAsStateWithLifecycle()
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val voiceState by voiceSettingsViewModel.uiState.collectAsStateWithLifecycle()
     val projects by viewModel.projects.collectAsStateWithLifecycle()
     val jobs by viewModel.jobs.collectAsStateWithLifecycle()
     val credentials by viewModel.credentials.collectAsStateWithLifecycle()
@@ -322,8 +337,22 @@ private fun AutoTubeStudioRoot(viewModel: StudioViewModel) {
                                 CreateVideoScreen(
                                     settings = settings,
                                     uiState = uiState,
+                                    voiceState = voiceState,
                                     channels = channels,
                                     onResearchTopics = viewModel::researchTopics,
+                                    onSelectVoice = voiceSettingsViewModel::selectVoice,
+                                    onSetVoiceProvider = voiceSettingsViewModel::setVoiceProvider,
+                                    onSetVoiceSpeed = voiceSettingsViewModel::setVoiceSpeed,
+                                    onPreviewVoice = { vid, prov, lang, spd ->
+                                        voiceSettingsViewModel.previewVoice(
+                                            voiceId = vid,
+                                            providerOverride = prov,
+                                            languageOverride = lang,
+                                            speedOverride = spd
+                                        )
+                                    },
+                                    onStopVoicePreview = voiceSettingsViewModel::stopPreview,
+                                    onOpenVoiceStudio = { navController.navigate(StudioRoutes.VOICE_SETTINGS) },
                                     onGenerateVideo = viewModel::createProjectAndGenerate
                                 )
                             }
@@ -331,7 +360,18 @@ private fun AutoTubeStudioRoot(viewModel: StudioViewModel) {
                             composable(StudioRoutes.AUTOMATION) {
                                 AutomationScreen(
                                     uiState = uiState,
+                                    voiceState = voiceState,
                                     channels = channels,
+                                    onPreviewVoice = { vid, prov, lang, spd ->
+                                        voiceSettingsViewModel.previewVoice(
+                                            voiceId = vid,
+                                            providerOverride = prov,
+                                            languageOverride = lang,
+                                            speedOverride = spd
+                                        )
+                                    },
+                                    onStopVoicePreview = voiceSettingsViewModel::stopPreview,
+                                    onOpenVoiceStudio = { navController.navigate(StudioRoutes.VOICE_SETTINGS) },
                                     onSaveSchedule = viewModel::saveAutomationSettings,
                                     onToggleAutomation = viewModel::toggleAutomation,
                                     onGenerateNow = viewModel::createProjectAndGenerate
@@ -359,9 +399,11 @@ private fun AutoTubeStudioRoot(viewModel: StudioViewModel) {
                                     settings = settings,
                                     connectedKeysCount = credentials.count { it.status == "connected" },
                                     connectedChannelName = channels.firstOrNull()?.channelName,
+                                    selectedVoiceSummary = "${voiceState.selectedVoice.displayName} (${voiceState.selectedVoice.badge})",
                                     onOpenApiKeys = { navController.navigate(StudioRoutes.API_KEYS) },
                                     onOpenYouTubeSettings = { navController.navigate(StudioRoutes.YOUTUBE_SETTINGS) },
                                     onOpenProviderStatus = { navController.navigate(StudioRoutes.PROVIDER_STATUS) },
+                                    onOpenVoiceSettings = { navController.navigate(StudioRoutes.VOICE_SETTINGS) },
                                     onSaveEndpoints = viewModel::saveCloudEndpoints,
                                     onCheckHealth = viewModel::checkServerHealth,
                                     onUpdateTheme = { dark -> viewModel.updateAppPreferences(darkTheme = dark) },
@@ -378,6 +420,24 @@ private fun AutoTubeStudioRoot(viewModel: StudioViewModel) {
                                     onClearCache = viewModel::clearLocalCache,
                                     onSignOut = viewModel::signOut,
                                     onDeleteAccount = viewModel::deleteAccount
+                                )
+                            }
+
+                            composable(StudioRoutes.VOICE_SETTINGS) {
+                                VoiceSettingsScreen(
+                                    uiState = voiceState,
+                                    onSelectVoice = voiceSettingsViewModel::selectVoice,
+                                    onSetProvider = voiceSettingsViewModel::setVoiceProvider,
+                                    onSetSpeed = voiceSettingsViewModel::setVoiceSpeed,
+                                    onSetPreviewLanguage = voiceSettingsViewModel::setPreviewLanguage,
+                                    onSetSampleText = voiceSettingsViewModel::setCustomSampleText,
+                                    onSetGenderFilter = voiceSettingsViewModel::setGenderFilter,
+                                    onSetSearchQuery = voiceSettingsViewModel::setSearchQuery,
+                                    onPreviewVoice = { vid -> voiceSettingsViewModel.previewVoice(vid) },
+                                    onStopPreview = voiceSettingsViewModel::stopPreview,
+                                    onRefreshVoices = voiceSettingsViewModel::loadVoicesCatalog,
+                                    onDismissFeedback = voiceSettingsViewModel::dismissFeedback,
+                                    onBack = { navController.popBackStack() }
                                 )
                             }
 
@@ -430,12 +490,23 @@ private fun AutoTubeStudioRoot(viewModel: StudioViewModel) {
                                 ProjectDetailScreen(
                                     projectId = pid,
                                     uiState = uiState,
+                                    voiceState = voiceState,
                                     channels = channels,
                                     onLoadDetail = viewModel::loadProjectDetail,
                                     onSaveScript = viewModel::saveProjectScript,
                                     onRegenerateScript = viewModel::regenerateProjectScript,
                                     onSaveSettingsAndRerender = viewModel::saveProjectSettingsAndRerender,
                                     onPublishProject = viewModel::publishProjectToYouTube,
+                                    onPreviewVoice = { vid, prov, lang, spd ->
+                                        voiceSettingsViewModel.previewVoice(
+                                            voiceId = vid,
+                                            providerOverride = prov,
+                                            languageOverride = lang,
+                                            speedOverride = spd
+                                        )
+                                    },
+                                    onStopVoicePreview = voiceSettingsViewModel::stopPreview,
+                                    onOpenVoiceStudio = { navController.navigate(StudioRoutes.VOICE_SETTINGS) },
                                     onNotifyUser = { msg, isError ->
                                         if (isError) viewModel.reportExternalError(msg)
                                         else viewModel.reportExternalInfo(msg)

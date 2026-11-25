@@ -27,6 +27,7 @@ import androidx.compose.material.icons.rounded.DeleteForever
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Key
+import androidx.compose.material.icons.rounded.RecordVoiceOver
 import androidx.compose.material.icons.rounded.SmartDisplay
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -64,9 +65,11 @@ fun SettingsScreen(
     settings: StudioAppSettings,
     connectedKeysCount: Int,
     connectedChannelName: String?,
+    selectedVoiceSummary: String = "Charon (Male)",
     onOpenApiKeys: () -> Unit,
     onOpenYouTubeSettings: () -> Unit,
     onOpenProviderStatus: () -> Unit,
+    onOpenVoiceSettings: () -> Unit = {},
     onSaveEndpoints: (backendUrl: String, supabaseUrl: String, anonKey: String) -> Unit,
     onCheckHealth: (String) -> Unit,
     onUpdateTheme: (Boolean) -> Unit,
@@ -176,6 +179,27 @@ fun SettingsScreen(
                             Text("AI Provider Status Dashboard", style = MaterialTheme.typography.titleMedium)
                             Text(
                                 text = "Real-time Healthy / Degraded status for Gemini, Groq, ElevenLabs",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, contentDescription = null)
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(onClick = onOpenVoiceSettings)
+                            .padding(16.dp)
+                            .testTag("settings_open_voice_studio_row"),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Rounded.RecordVoiceOver, contentDescription = null, tint = SignalCrimson)
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("AI Voice Studio (30 Voices & Preview)", style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                text = "Active: $selectedVoiceSummary • Listen & pick your default narrator",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )

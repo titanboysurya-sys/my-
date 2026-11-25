@@ -61,6 +61,7 @@ import com.example.ui.screens.JobDetailScreen
 import com.example.ui.screens.ProjectDetailScreen
 import com.example.ui.screens.ProjectsScreen
 import com.example.ui.screens.SettingsScreen
+import com.example.ui.screens.ProviderStatusScreen
 import com.example.ui.screens.YouTubeSettingsScreen
 import com.example.ui.theme.AutoTubeStudioTheme
 import com.example.ui.viewmodel.StudioViewModel
@@ -73,6 +74,7 @@ object StudioRoutes {
     const val SETTINGS = "settings"
     const val API_KEYS = "api_keys"
     const val YOUTUBE_SETTINGS = "youtube_settings"
+    const val PROVIDER_STATUS = "provider_status"
     const val PROJECT_DETAIL = "project_detail/{projectId}"
     const val JOB_DETAIL = "job_detail/{jobId}"
 
@@ -355,6 +357,7 @@ private fun AutoTubeStudioRoot(viewModel: StudioViewModel) {
                                     connectedChannelName = channels.firstOrNull()?.channelName,
                                     onOpenApiKeys = { navController.navigate(StudioRoutes.API_KEYS) },
                                     onOpenYouTubeSettings = { navController.navigate(StudioRoutes.YOUTUBE_SETTINGS) },
+                                    onOpenProviderStatus = { navController.navigate(StudioRoutes.PROVIDER_STATUS) },
                                     onSaveEndpoints = viewModel::saveCloudEndpoints,
                                     onCheckHealth = viewModel::checkServerHealth,
                                     onUpdateTheme = { dark -> viewModel.updateAppPreferences(darkTheme = dark) },
@@ -401,6 +404,16 @@ private fun AutoTubeStudioRoot(viewModel: StudioViewModel) {
                                     onConnectYouTube = viewModel::initiateYouTubeConnect,
                                     onSetDefaultYouTube = viewModel::setDefaultYouTube,
                                     onDisconnectYouTube = viewModel::disconnectYouTube,
+                                    onBack = { navController.popBackStack() }
+                                )
+                            }
+
+                            composable(StudioRoutes.PROVIDER_STATUS) {
+                                ProviderStatusScreen(
+                                    credentials = credentials,
+                                    uiState = uiState,
+                                    onRefresh = viewModel::refreshCredentials,
+                                    onOpenApiKeys = { navController.navigate(StudioRoutes.API_KEYS) },
                                     onBack = { navController.popBackStack() }
                                 )
                             }

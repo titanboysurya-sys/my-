@@ -66,6 +66,7 @@ fun SettingsScreen(
     connectedChannelName: String?,
     onOpenApiKeys: () -> Unit,
     onOpenYouTubeSettings: () -> Unit,
+    onOpenProviderStatus: () -> Unit,
     onSaveEndpoints: (backendUrl: String, supabaseUrl: String, anonKey: String) -> Unit,
     onCheckHealth: (String) -> Unit,
     onUpdateTheme: (Boolean) -> Unit,
@@ -154,6 +155,27 @@ fun SettingsScreen(
                             Text("YouTube Account & Channel", style = MaterialTheme.typography.titleMedium)
                             Text(
                                 text = connectedChannelName ?: "Not connected • Authorize via Google OAuth 2.0",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, contentDescription = null)
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(onClick = onOpenProviderStatus)
+                            .padding(16.dp)
+                            .testTag("settings_open_provider_status_row"),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Rounded.Cloud, contentDescription = null, tint = PipelineCyan)
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("AI Provider Status Dashboard", style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                text = "Real-time Healthy / Degraded status for Gemini, Groq, ElevenLabs",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )

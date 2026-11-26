@@ -517,7 +517,7 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
       alreadySearched ? 66 : 38,
       alreadySearched
         ? 'Restoring cached media clips for rendering'
-        : 'Searching relevant stock footage across Pexels & Pixabay',
+        : 'Searching Pexels/Pixabay, Lexica AI, Civitai, Openverse & AI Horde visuals',
       completedStages
     );
 
@@ -585,11 +585,13 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
         usedExternalIds,
         mediaSourceMode,
         customMediaUrl: sceneCustomUrl,
+        niche: project.niche,
+        contentStyle: project.content_style,
       });
 
       if (!candidate) {
         throw new Error(
-          `No relevant footage found for Scene ${scene.scene_number} ("${scene.primary_keyword}"). Add a custom open-source URL or connect Pexels/Pixabay.`
+          `No relevant footage found for Scene ${scene.scene_number} ("${scene.primary_keyword}"). Try simplifying scene keywords or adding a custom open-source URL.`
         );
       }
       usedExternalIds.add(candidate.externalId);

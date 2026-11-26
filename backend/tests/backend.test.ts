@@ -23,7 +23,14 @@ import {
   rankGeminiTtsModels,
   rankGroqChatModels,
 } from '../src/services/modelResolver.js';
-import { scoreMediaCandidate, type MediaCandidate } from '../src/services/mediaSearchService.js';
+import {
+  buildAiVisualSearchQuery,
+  isCartoonOrStylizedIntent,
+  scoreMediaCandidate,
+  searchCivitaiImages,
+  searchLexicaImages,
+  type MediaCandidate,
+} from '../src/services/mediaSearchService.js';
 import {
   defaultPreviewSampleText,
   resolveStudioVoiceProfile,
@@ -655,4 +662,103 @@ test('generateScriptWithAI prompt enforces explicit delimiters and parses sectio
   assert.ok(generated.narrationText.includes('Stop scrolling because ancient Roman concrete still heals itself today.'));
   assert.ok(generated.fullScript.includes(VIDEO_VISUAL_INSTRUCTIONS_START));
   assert.ok(generated.fullScript.includes(VOICEOVER_SCRIPT_START));
+});
+
+test('Lexica AI, Civitai AI, Openverse, and AI Horde CDN hosts pass media SSRF guard and cartoon intent works', async () => {
+  assert.doesNotThrow(() =>
+    assertSafeExternalUrl('https://image.lexica.art/md/0482ee68-0368-4eca-8846-5930db866b33', 'media')
+  );
+  assert.doesNotThrow(() =>
+    assertSafeExternalUrl(
+      'https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/12345678/width=1080/sample.jpeg',
+      'media'
+    )
+  );
+  assert.doesNotThrow(() =>
+    assertSafeExternalUrl('https://assets.aihorde.net/temporary/sample.webp', 'media')
+  );
+  assert.doesNotThrow(() =>
+    assertSafeExternalUrl('https://stablehorde.net/temporary/12345.webp', 'media')
+  );
+
+  assert.equal(isCartoonOrStylizedIntent({ niche: 'Cartoon', contentStyle: 'documentary' }), true);
+  assert.equal(isCartoonOrStylizedIntent({ niche: 'Finance', contentStyle: 'news_brief' }), false);
+  assert.equal(
+    buildAiVisualSearchQuery('clever fox', 'clever fox in forest', true),
+    'clever fox cartoon illustration'
+  );
+
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = (async (input: string | URL) => {
+      const u = String(input);
+      if (u.startsWith('https://lexica.art/api/v1/search')) {
+        return new Response(
+          JSON.stringify({
+            images: [
+              {
+                id: 'lex-1',
+                gallery: 'https://lexica.art?q=lex-1',
+                src: 'https://image.lexica.art/md/lex-1',
+                prompt: 'cute cartoon fox in forest',
+                width: 768,
+                height: 1024,
+                nsfw: false,
+              },
+              {
+                id: 'lex-nsfw',
+                src: 'https://image.lexica.art/md/lex-nsfw',
+                width: 768,
+                height: 1024,
+                nsfw: true,
+              },
+            ],
+          }),
+          { status: 200 }
+        );
+      }
+      if (u.startsWith('https://civitai.com/api/v1/models')) {
+        return new Response(
+          JSON.stringify({
+            items: [
+              {
+                id: 901,
+                name: 'Pixar Cartoon 3D',
+                nsfw: false,
+                tags: ['cartoon', '3d', 'animation'],
+                modelVersions: [
+                  {
+                    images: [
+                      {
+                        id: 4001,
+                        url: 'https://image.civitai.com/xG1/abc/width=450/fox.jpeg',
+                        type: 'image',
+                        width: 1024,
+                        height: 1024,
+                        nsfwLevel: 1,
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          }),
+          { status: 200 }
+        );
+      }
+      return new Response('{}', { status: 404 });
+    }) as typeof fetch;
+
+    const lexicaResults = await searchLexicaImages('cartoon fox');
+    assert.equal(lexicaResults.length, 1);
+    assert.equal(lexicaResults[0].provider, 'ai_generated');
+    assert.equal(lexicaResults[0].externalId, 'lexica-lex-1');
+
+    const civitaiResults = await searchCivitaiImages('cartoon');
+    assert.equal(civitaiResults.length, 1);
+    assert.equal(civitaiResults[0].provider, 'ai_generated');
+    assert.ok(civitaiResults[0].downloadUrl.includes('/width=1080/'));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

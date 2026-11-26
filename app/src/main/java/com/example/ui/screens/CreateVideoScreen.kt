@@ -78,7 +78,7 @@ import java.util.Calendar
 import java.util.TimeZone
 
 val ALL_STUDIO_NICHES = listOf(
-    "Facts", "History", "Technology", "AI News", "Educational", "Comedy",
+    "Facts", "Cartoon", "History", "Technology", "AI News", "Educational", "Comedy",
     "Motivation", "Stories", "Science", "Business", "Finance",
     "Entertainment", "Travel", "Documentary"
 )
@@ -95,7 +95,7 @@ val STUDIO_LANGUAGES = listOf(
 )
 
 val STUDIO_CONTENT_STYLES = listOf(
-    "documentary", "storytelling", "fast_facts", "explainer", "news_brief", "cinematic"
+    "documentary", "cartoon", "storytelling", "fast_facts", "explainer", "news_brief", "cinematic"
 )
 
 @OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)

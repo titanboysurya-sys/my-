@@ -623,7 +623,7 @@ fun MediaSourceAndLinksSection(
             Column {
                 Text("Visual Media Sources & Open-Source Links", style = MaterialTheme.typography.titleMedium)
                 Text(
-                    text = "Matches stock APIs + Wikimedia, Openverse, NASA & Internet Archive to your voiceover",
+                    text = "Works even without Pexels/Pixabay keys — built-in Lexica AI, Civitai, Openverse, AI Horde, Wikimedia & NASA",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

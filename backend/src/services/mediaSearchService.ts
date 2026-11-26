@@ -10,7 +10,13 @@ import {
 } from '../security/urlGuard.js';
 import { resolveUserProviderKey } from './credentialService.js';
 
-export type MediaProviderDbKey = 'pexels' | 'pixabay' | 'wikimedia' | 'nasa' | 'user_upload';
+export type MediaProviderDbKey =
+  | 'pexels'
+  | 'pixabay'
+  | 'wikimedia'
+  | 'nasa'
+  | 'user_upload'
+  | 'ai_generated';
 export type MediaSourceMode = 'all' | 'open_source_only' | 'api_only';
 
 export interface MediaCandidate {
@@ -47,6 +53,34 @@ export interface SceneMediaSearchInput {
   usedExternalIds: Set<string>;
   mediaSourceMode?: MediaSourceMode;
   customMediaUrl?: string | null;
+  niche?: string;
+  contentStyle?: string;
+}
+
+export function isCartoonOrStylizedIntent(input: {
+  niche?: string;
+  contentStyle?: string;
+  visualDescription?: string;
+  primaryKeyword?: string;
+}): boolean {
+  const combined = `${input.niche || ''} ${input.contentStyle || ''} ${input.visualDescription || ''} ${input.primaryKeyword || ''}`;
+  return /\b(cartoon|anime|animated|animation|pixar|disney|3d\s*art|2d\s*art|comic|manga|illustration|kids\s*story|fairy\s*tale|storybook|fantasy)\b/i.test(
+    combined
+  );
+}
+
+export function buildAiVisualSearchQuery(
+  keyword: string,
+  visualDescription: string,
+  cartoonIntent: boolean
+): string {
+  const base = (keyword || visualDescription || '').trim();
+  if (!base) return cartoonIntent ? 'colorful cartoon illustration' : 'cinematic scene';
+  if (!cartoonIntent) return base;
+  if (/\b(cartoon|anime|animated|illustration|3d|pixar|comic)\b/i.test(base)) {
+    return base;
+  }
+  return `${base} cartoon illustration`;
 }
 
 /**
@@ -520,25 +554,26 @@ async function searchWikimediaCommonsImages(query: string): Promise<MediaCandida
 }
 
 /**
- * Open-Source (No API Key): Openverse Creative Commons curated photo index
+ * Open-Source (No API Key): Openverse Creative Commons curated photo & illustration index
  */
 async function searchOpenverseImages(
   query: string,
   format: '9:16' | '16:9' | '1:1'
 ): Promise<MediaCandidate[]> {
   const aspect = format === '9:16' ? 'tall' : format === '16:9' ? 'wide' : 'square';
-  const url = `https://api.openverse.org/v1/images/?q=${encodeURIComponent(
-    query
-  )}&aspect_ratio=${aspect}&license_type=commercial&page_size=8`;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 7000);
-  try {
+  const fetchOpenverse = async (withAspect: boolean) => {
+    const url = withAspect
+      ? `https://api.openverse.org/v1/images/?q=${encodeURIComponent(
+          query
+        )}&aspect_ratio=${aspect}&license_type=commercial&page_size=8`
+      : `https://api.openverse.org/v1/images/?q=${encodeURIComponent(
+          query
+        )}&license_type=commercial&page_size=8`;
     const res = await fetch(url, {
       signal: controller.signal,
       headers: { 'User-Agent': 'AutoTubeStudio/1.0' },
     }).catch(() => null);
     if (!res?.ok) return [];
-
     const data = (await res.json()) as {
       results?: Array<{
         id: string;
@@ -552,14 +587,24 @@ async function searchOpenverseImages(
         tags?: Array<{ name?: string }>;
       }>;
     };
+    return data.results || [];
+  };
 
-    return (data.results || [])
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
+  try {
+    let results = await fetchOpenverse(true);
+    if (results.length < 2) {
+      const broad = await fetchOpenverse(false);
+      if (broad.length > results.length) results = broad;
+    }
+
+    return results
       .map((r): MediaCandidate | null => {
         if (!r.url || !r.url.startsWith('https://')) return null;
         const w = r.width || 1280;
         const h = r.height || 720;
-        if (w < 640 || h < 480) return null;
-        // Ensure Openverse host is either in allowlist or safe public HTTPS image host
+        if (Math.max(w, h) < 480) return null;
         try {
           assertSafeExternalUrl(r.url, 'user_media');
         } catch {
@@ -582,12 +627,296 @@ async function searchOpenverseImages(
             license: r.license || 'CC-BY',
             attributionRequired: true,
           },
-          isUserSuppliedUrl: true, // uses DNS-verified user_media guard because Openverse links to Flickr/Wikimedia/etc.
+          isUserSuppliedUrl: true,
         };
       })
       .filter((x): x is MediaCandidate => x !== null);
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+/**
+ * Backend-Only AI Visual Source (No User API Key): Lexica AI prompt-matched image search
+ * Endpoint: GET https://lexica.art/api/v1/search?q=...
+ */
+export async function searchLexicaImages(query: string): Promise<MediaCandidate[]> {
+  const url = `https://lexica.art/api/v1/search?q=${encodeURIComponent(query)}`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'AutoTubeStudio/1.0',
+        Accept: 'application/json',
+      },
+    }).catch(() => null);
+    if (!res?.ok) return [];
+
+    const data = (await res.json()) as {
+      images?: Array<{
+        id?: string;
+        gallery?: string;
+        src?: string;
+        srcSmall?: string;
+        prompt?: string;
+        width?: number;
+        height?: number;
+        model?: string;
+        nsfw?: boolean;
+      }>;
+    };
+
+    return (data.images || [])
+      .slice(0, 10)
+      .map((img): MediaCandidate | null => {
+        if (!img.id || img.nsfw || !img.src?.startsWith('https://')) return null;
+        const w = Number(img.width || 768);
+        const h = Number(img.height || 768);
+        if (Math.max(w, h) < 480) return null;
+        try {
+          assertSafeExternalUrl(img.src, 'media');
+        } catch {
+          return null;
+        }
+        return {
+          provider: 'ai_generated',
+          externalId: `lexica-${img.id}`,
+          mediaType: 'image',
+          originalUrl: img.gallery || img.src,
+          downloadUrl: img.src,
+          width: w,
+          height: h,
+          durationSec: 0,
+          titleOrTags: `${img.prompt || ''} ${query}`.trim(),
+          authorName: 'Lexica AI',
+          licenseMetadata: {
+            source: 'Lexica AI',
+            model: img.model || 'stable-diffusion',
+            attributionRequired: false,
+          },
+        };
+      })
+      .filter((x): x is MediaCandidate => x !== null);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * Backend-Only AI Visual Source (No User API Key): Civitai public model & artwork search
+ * Endpoint: GET https://civitai.com/api/v1/models?query=...&nsfw=false
+ */
+export async function searchCivitaiImages(query: string): Promise<MediaCandidate[]> {
+  const fetchCivitaiModels = async (paramStr: string) => {
+    const url = `https://civitai.com/api/v1/models?${paramStr}&nsfw=false&limit=6&sort=Highest%20Rated`;
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'AutoTubeStudio/1.0',
+        Accept: 'application/json',
+      },
+    }).catch(() => null);
+    if (!res?.ok) return [];
+    const data = (await res.json()) as {
+      items?: Array<{
+        id?: number;
+        name?: string;
+        nsfw?: boolean;
+        tags?: string[];
+        modelVersions?: Array<{
+          images?: Array<{
+            id?: number;
+            url?: string;
+            type?: string;
+            width?: number;
+            height?: number;
+            nsfwLevel?: number;
+            meta?: { prompt?: string };
+          }>;
+        }>;
+      }>;
+    };
+    return data.items || [];
+  };
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
+  try {
+    let items = await fetchCivitaiModels(`query=${encodeURIComponent(query)}`);
+    if (items.length === 0) {
+      const firstTag = query.split(/\s+/).find((w) => w.length >= 3);
+      if (firstTag) {
+        items = await fetchCivitaiModels(`tag=${encodeURIComponent(firstTag.toLowerCase())}`);
+      }
+    }
+
+    const out: MediaCandidate[] = [];
+    for (const item of items) {
+      if (item.nsfw) continue;
+      const versionImages = item.modelVersions?.[0]?.images || [];
+      for (const img of versionImages.slice(0, 3)) {
+        if (!img.url?.startsWith('https://')) continue;
+        if (img.type && img.type.toLowerCase() !== 'image') continue;
+        if (typeof img.nsfwLevel === 'number' && img.nsfwLevel > 2) continue;
+        const upgradedUrl = img.url.replace(/\/width=\d+\//i, '/width=1080/');
+        try {
+          assertSafeExternalUrl(upgradedUrl, 'media');
+        } catch {
+          continue;
+        }
+        const imgId =
+          img.id || crypto.createHash('sha1').update(upgradedUrl).digest('hex').slice(0, 12);
+        out.push({
+          provider: 'ai_generated',
+          externalId: `civitai-${imgId}`,
+          mediaType: 'image',
+          originalUrl: `https://civitai.com/models/${item.id || ''}`,
+          downloadUrl: upgradedUrl,
+          width: Number(img.width || 1024),
+          height: Number(img.height || 1024),
+          durationSec: 0,
+          titleOrTags: `${item.name || ''} ${(item.tags || []).join(' ')} ${
+            img.meta?.prompt || ''
+          } ${query}`.trim(),
+          authorName: 'Civitai AI',
+          licenseMetadata: {
+            source: 'Civitai AI',
+            modelName: item.name || 'Civitai Community Model',
+            attributionRequired: false,
+          },
+        });
+      }
+    }
+    return out;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * Backend-Only AI Image Generator (No User Key Required; uses AI_HORDE_API_KEY or '0000000000'):
+ * AI Horde (https://aihorde.net/api/v2/generate/async) generates fresh scene artwork
+ * for cartoons, animations, or scenes with no stock/open-source photo match.
+ */
+export async function generateImageWithAiHorde(params: {
+  prompt: string;
+  format: '9:16' | '16:9' | '1:1';
+  isCartoon: boolean;
+  maxPollCycles?: number;
+}): Promise<ScoredMediaCandidate | null> {
+  const apiKey = (process.env.AI_HORDE_API_KEY || '0000000000').trim();
+  const dims =
+    params.format === '9:16'
+      ? { width: 512, height: 896 }
+      : params.format === '16:9'
+        ? { width: 896, height: 512 }
+        : { width: 640, height: 640 };
+
+  const cleanPrompt = params.prompt.replace(/[\r\n]+/g, ' ').trim().slice(0, 260);
+  if (!cleanPrompt) return null;
+
+  const styledPrompt = params.isCartoon
+    ? `${cleanPrompt}, vibrant 3d cartoon animation style, colorful clean lighting, high detail, expressive`
+    : `${cleanPrompt}, cinematic digital illustration, crisp lighting, ultra detailed, 8k`;
+
+  const headers = {
+    'Content-Type': 'application/json',
+    apikey: apiKey,
+    'Client-Agent': 'AutoTubeStudio:1.0:backend',
+  };
+
+  const controller = new AbortController();
+  const overallTimeout = setTimeout(() => controller.abort(), 32_000);
+  try {
+    const submitRes = await fetch('https://aihorde.net/api/v2/generate/async', {
+      method: 'POST',
+      headers,
+      signal: controller.signal,
+      body: JSON.stringify({
+        prompt: styledPrompt,
+        params: {
+          steps: 20,
+          width: dims.width,
+          height: dims.height,
+          n: 1,
+          cfg_scale: 7,
+          sampler_name: 'k_euler_a',
+        },
+        nsfw: false,
+        censor_nsfw: true,
+        trusted_workers: false,
+        r2: true,
+        models: ['Deliberate', 'stable_diffusion'],
+      }),
+    }).catch(() => null);
+
+    if (!submitRes?.ok) return null;
+    const submitData = (await submitRes.json()) as { id?: string };
+    const jobId = submitData.id;
+    if (!jobId) return null;
+
+    const maxCycles = params.maxPollCycles ?? 10;
+    for (let cycle = 0; cycle < maxCycles; cycle++) {
+      await new Promise((r) => setTimeout(r, 2500));
+      const statusRes = await fetch(
+        `https://aihorde.net/api/v2/generate/status/${encodeURIComponent(jobId)}`,
+        {
+          headers: { 'Client-Agent': 'AutoTubeStudio:1.0:backend' },
+          signal: controller.signal,
+        }
+      ).catch(() => null);
+      if (!statusRes?.ok) continue;
+
+      const status = (await statusRes.json()) as {
+        finished?: boolean | number;
+        faulted?: boolean;
+        wait_time?: number;
+        generations?: Array<{ img?: string; censored?: boolean; model?: string }>;
+      };
+
+      if (status.faulted) return null;
+      if (Number(status.wait_time || 0) > 120 && cycle >= 2) {
+        // Queue too slow for synchronous pipeline wait; bail cleanly
+        return null;
+      }
+
+      if (status.finished === true || status.finished === 1) {
+        const gen = status.generations?.[0];
+        if (!gen?.img || gen.censored || !gen.img.startsWith('https://')) {
+          return null;
+        }
+        try {
+          assertSafeExternalUrl(gen.img, 'user_media');
+        } catch {
+          return null;
+        }
+        return {
+          provider: 'ai_generated',
+          externalId: `aihorde-${jobId}`,
+          mediaType: 'image',
+          originalUrl: `https://aihorde.net/#${jobId}`,
+          downloadUrl: gen.img,
+          width: dims.width,
+          height: dims.height,
+          durationSec: 0,
+          titleOrTags: styledPrompt,
+          authorName: 'AI Horde',
+          licenseMetadata: {
+            source: 'AI Horde',
+            model: gen.model || 'stable_diffusion',
+            attributionRequired: false,
+          },
+          isUserSuppliedUrl: true,
+          relevanceScore: 0.84,
+          isFallback: true,
+        };
+      }
+    }
+    return null;
+  } finally {
+    clearTimeout(overallTimeout);
   }
 }
 
@@ -718,9 +1047,10 @@ async function searchInternetArchiveVideos(query: string): Promise<MediaCandidat
 /**
  * Executes voiceover-matched media search cascade:
  * 0. User-provided custom / open-source direct link for this scene (highest priority!)
- * 1. Pexels & Pixabay stock video + Internet Archive open-source video (when enabled)
- * 2. Stock & Open-Source high-res images (Pexels, Pixabay, Openverse, Wikimedia Commons, NASA)
- *    with strict semantic scoring against narration + visual description so visuals match voiceover!
+ * 1. Pexels & Pixabay stock video + Internet Archive open-source video (when enabled & non-cartoon)
+ * 2. Open-Source & AI Visual Libraries (Lexica AI, Civitai AI, Openverse AI, Wikimedia Commons, NASA)
+ *    + Stock images (Pexels, Pixabay) — works with ZERO user Pexels/Pixabay API keys!
+ * 3. Live AI Horde image generation fallback for cartoons or unmatched scenes.
  */
 export async function findBestMediaForScene(
   input: SceneMediaSearchInput
@@ -745,9 +1075,11 @@ export async function findBestMediaForScene(
   const mode: MediaSourceMode = input.mediaSourceMode || 'all';
   const useApis = mode !== 'open_source_only';
   const useOpenSource = mode !== 'api_only';
+  const cartoonIntent = isCartoonOrStylizedIntent(input);
 
   const pexelsCred = useApis ? await resolveUserProviderKey(input.userId, 'pexels') : null;
   const pixabayCred = useApis ? await resolveUserProviderKey(input.userId, 'pixabay') : null;
+  const hasNoStockApiKey = !pexelsCred && !pixabayCred;
 
   const keywords = [input.primaryKeyword, ...input.alternativeKeywords]
     .map((k) => k.trim())
@@ -755,25 +1087,34 @@ export async function findBestMediaForScene(
 
   const evaluate = (candidates: MediaCandidate[], isFallback: boolean): ScoredMediaCandidate[] =>
     candidates
-      .map((c) => ({
-        ...c,
-        isFallback,
-        relevanceScore: scoreMediaCandidate(c, {
+      .map((c) => {
+        const baseScore = scoreMediaCandidate(c, {
           keywords,
           visualDescription: input.visualDescription,
           narration: input.narration,
           targetDurationSec: input.targetDurationSec,
           format: input.format,
-          preferredType: input.preferredType,
+          preferredType: cartoonIntent ? 'image' : input.preferredType,
           alreadyUsed: input.usedExternalIds.has(c.externalId),
-        }),
-      }))
-      .filter((c) => c.relevanceScore >= 0.34)
+        });
+        // Boost Lexica/Civitai/AI Horde stylized artwork when creating cartoons or when no stock keys exist
+        const styleBoost =
+          baseScore > 0.15 && c.provider === 'ai_generated' && (cartoonIntent || hasNoStockApiKey)
+            ? 0.12
+            : 0;
+        const adjusted = Math.round(Math.min(1, baseScore + styleBoost) * 1000) / 1000;
+        return {
+          ...c,
+          isFallback,
+          relevanceScore: adjusted,
+        };
+      })
+      .filter((c) => c.relevanceScore >= (hasNoStockApiKey || cartoonIntent ? 0.24 : 0.34))
       .sort((a, b) => b.relevanceScore - a.relevanceScore);
 
-  // Pass 1: Stock video search across keywords and providers
+  // Pass 1: Stock video search across keywords and providers (skipped in cartoon mode so animated art wins)
   const allVideoCandidates: ScoredMediaCandidate[] = [];
-  if (useApis && (pexelsCred || pixabayCred)) {
+  if (useApis && !cartoonIntent && (pexelsCred || pixabayCred)) {
     for (const kw of keywords.slice(0, 3)) {
       const batch: MediaCandidate[] = [];
       if (pexelsCred) {
@@ -790,8 +1131,13 @@ export async function findBestMediaForScene(
     }
   }
 
-  // Pass 1b: Open-source video search (Internet Archive) when open-source mode is enabled and no high-confidence API video yet
-  if (useOpenSource && keywords.length > 0 && (!allVideoCandidates[0] || allVideoCandidates[0].relevanceScore < 0.62)) {
+  // Pass 1b: Open-source video search (Internet Archive) for non-cartoon scenes when no strong API video matched
+  if (
+    useOpenSource &&
+    !cartoonIntent &&
+    keywords.length > 0 &&
+    (!allVideoCandidates[0] || allVideoCandidates[0].relevanceScore < 0.62)
+  ) {
     const iaBatch = await searchInternetArchiveVideos(keywords[0]);
     allVideoCandidates.push(...evaluate(iaBatch, false));
   }
@@ -801,16 +1147,21 @@ export async function findBestMediaForScene(
     return allVideoCandidates[0];
   }
 
-  // Pass 2: High-relevance images across BOTH stock APIs and Open-Source libraries (Openverse + Wikimedia + NASA)
+  // Pass 2: Backend AI & Open-Source Image Cascade (Lexica AI, Civitai AI, Openverse, Wikimedia, NASA + Stock images)
   const allImageCandidates: ScoredMediaCandidate[] = [];
   for (const kw of keywords.slice(0, 2)) {
     const queries: Array<Promise<MediaCandidate[]>> = [];
     if (pexelsCred) queries.push(searchPexels(pexelsCred.apiKey, kw, 'image', input.format));
     if (pixabayCred) queries.push(searchPixabay(pixabayCred.apiKey, kw, 'image'));
     if (useOpenSource) {
-      queries.push(searchWikimediaCommonsImages(kw));
+      const aiQuery = buildAiVisualSearchQuery(kw, input.visualDescription, cartoonIntent);
+      queries.push(searchLexicaImages(aiQuery));
+      queries.push(searchCivitaiImages(aiQuery));
       queries.push(searchOpenverseImages(kw, input.format));
-      queries.push(searchNasaImages(kw));
+      queries.push(searchWikimediaCommonsImages(kw));
+      if (!cartoonIntent) {
+        queries.push(searchNasaImages(kw));
+      }
     }
     const batches = await Promise.all(queries);
     const merged = batches.flat();
@@ -821,10 +1172,23 @@ export async function findBestMediaForScene(
     allImageCandidates.push(...ranked);
   }
 
-  // Compare best video vs best exact-match open-source/stock image so voiceover matching wins!
+  // Pass 3: AI Horde live backend generation when search didn't find a strong visual
   allImageCandidates.sort((a, b) => b.relevanceScore - a.relevanceScore);
   const bestVid = allVideoCandidates[0] || null;
   const bestImg = allImageCandidates[0] || null;
+  const bestCurrentScore = Math.max(bestVid?.relevanceScore || 0, bestImg?.relevanceScore || 0);
+
+  if (useOpenSource && bestCurrentScore < (cartoonIntent ? 0.52 : 0.42)) {
+    const hordePrompt = input.visualDescription || input.primaryKeyword;
+    const hordeAsset = await generateImageWithAiHorde({
+      prompt: hordePrompt,
+      format: input.format,
+      isCartoon: cartoonIntent,
+    }).catch(() => null);
+    if (hordeAsset) {
+      return hordeAsset;
+    }
+  }
 
   if (bestVid && bestImg) {
     return bestImg.relevanceScore >= bestVid.relevanceScore + 0.14 ? bestImg : bestVid;

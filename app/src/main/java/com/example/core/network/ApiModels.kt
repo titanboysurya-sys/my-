@@ -259,7 +259,14 @@ data class CreateProjectRequest(
     val youtubeAccountId: String? = null,
     val mediaSourceMode: String = "all",
     val customMediaUrls: List<String>? = null,
-    val startImmediately: Boolean = true
+    val startImmediately: Boolean = true,
+    val editingPace: String = "viral_fast",
+    val bgmMood: String = "auto",
+    val sfxEnabled: Boolean = true,
+    val colorGrade: String = "vibrant",
+    val whisperSync: Boolean = true,
+    val hookStyle: String = "viral_retention",
+    val hookBannerEnabled: Boolean = true
 )
 
 @JsonClass(generateAdapter = true)
@@ -356,7 +363,13 @@ data class UpdateProjectSettingsRequest(
     val subtitlesEnabled: Boolean? = null,
     val mediaSourceMode: String? = null,
     val customMediaUrls: List<String>? = null,
-    val sceneOverrides: List<SceneOverrideRequest>? = null
+    val sceneOverrides: List<SceneOverrideRequest>? = null,
+    val editingPace: String? = null,
+    val bgmMood: String? = null,
+    val sfxEnabled: Boolean? = null,
+    val colorGrade: String? = null,
+    val whisperSync: Boolean? = null,
+    val hookBannerEnabled: Boolean? = null
 )
 
 @JsonClass(generateAdapter = true)

@@ -30,12 +30,18 @@ import {
   wrapPcm16AsWav,
 } from '../src/services/voiceService.js';
 import {
+  buildColorGradeFilter,
   buildSynchronizedAss,
   buildSynchronizedSrt,
   calibrateClipDurations,
+  normalizeColorGrade,
+  normalizeEditingPace,
   normalizeSubtitlePreset,
   resolveOutputDimensions,
 } from '../src/services/ffmpegRenderer.js';
+import { sanitizeSpokenNarration } from '../src/services/narrationSanitizer.js';
+import { autoBgmMoodForNiche, normalizeBgmMood } from '../src/services/soundDesignService.js';
+import { mapScriptWordsToWhisperTimings } from '../src/services/whisperAlignService.js';
 import {
   computeRetryBackoffSeconds,
   isPermanentError,
@@ -483,6 +489,83 @@ test('User custom open-source media URL guard allows public HTTPS links and bloc
   assert.throws(() => assertSafeExternalUrl('https://169.254.169.254/latest/meta-data', 'user_media'));
   assert.throws(() => assertSafeExternalUrl('https://user:pass@example.com/clip.mp4', 'user_media'));
 });
+
+test('Narration sanitizer strips visual instructions, stage cues, and labels while keeping Hindi & English spoken text', () => {
+  const dirtyScript = [
+    '**Scene 1: Hook**',
+    '[Visual: Dramatic drone zoom over ancient Rome at sunset]',
+    '(Camera zooms in fast with whoosh SFX)',
+    '00:00 - 00:03 Narrator: क्या आप जानते हैं कि रोमन कंक्रीट आज भी खुद को ठीक कर लेता है?',
+    '*pause for impact*',
+    'SFX: Boom',
+    'Hook: Wait—here is the real scientific secret behind it.',
+  ].join('\n');
+
+  const clean = sanitizeSpokenNarration(dirtyScript);
+  assert.ok(!clean.includes('Visual'));
+  assert.ok(!clean.includes('Camera'));
+  assert.ok(!clean.includes('Scene 1'));
+  assert.ok(!clean.includes('Narrator:'));
+  assert.ok(!clean.includes('SFX'));
+  assert.ok(!clean.includes('pause'));
+  assert.ok(clean.includes('क्या आप जानते हैं कि रोमन कंक्रीट आज भी खुद को ठीक कर लेता है?'));
+  assert.ok(clean.includes('Wait—here is the real scientific secret behind it.'));
+});
+
+test('Phase 1 viral editing presets, BGM moods, Whisper word timing, and HookBanner ASS work cleanly', () => {
+  assert.equal(normalizeEditingPace('viral_fast'), 'viral_fast');
+  assert.equal(normalizeColorGrade('teal_orange'), 'teal_orange');
+  assert.ok(buildColorGradeFilter('dark_moody').includes('vignette'));
+  assert.equal(autoBgmMoodForNiche('AI News'), 'tech');
+  assert.equal(autoBgmMoodForNiche('History'), 'mystery');
+  assert.equal(normalizeBgmMood('dark'), 'dark_phonk');
+
+  const aligned = mapScriptWordsToWhisperTimings(
+    ['THIS', 'SECRET', 'WORKS'],
+    [
+      { word: 'this', startSec: 0.1, endSec: 0.45 },
+      { word: 'secret', startSec: 0.5, endSec: 1.05 },
+      { word: 'works', startSec: 1.1, endSec: 1.65 },
+    ],
+    0,
+    2.0
+  );
+  assert.equal(aligned.length, 3);
+  assert.equal(aligned[1].startSec, 0.5);
+  assert.equal(aligned[1].endSec, 1.05);
+
+  const ass = buildSynchronizedAss(
+    [
+      {
+        sceneNumber: 1,
+        localMediaPath: '/tmp/1.mp4',
+        mediaType: 'video',
+        durationSec: 2.0,
+        subtitleText: '[Visual: rocket] This secret works',
+        transition: 'punch',
+      },
+    ],
+    720,
+    1280,
+    {
+      enabled: true,
+      burnIn: true,
+      preset: 'mrbeast',
+      fontSize: 44,
+      primaryColor: '#FFFFFF',
+      outlineColor: '#000000',
+      position: 'bottom_safe',
+    },
+    {
+      whisperWords: aligned,
+      hookBannerText: 'Hidden Roman Concrete Secret',
+    }
+  );
+  assert.ok(ass.includes('Style: HookBanner'));
+  assert.ok(ass.includes('HIDDEN ROMAN CONCRETE SECRET'));
+  assert.ok(!ass.includes('[Visual'));
+});
+
 
 
 

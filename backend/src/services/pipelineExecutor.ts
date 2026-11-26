@@ -20,12 +20,26 @@ import {
 } from './mediaSearchService.js';
 import {
   generateThumbnailFromVideo,
+  normalizeColorGrade,
+  normalizeEditingPace,
   normalizeSubtitlePreset,
   renderVideoWithFfmpeg,
   type SubtitleStyleConfig,
   type TimelineSceneClip,
 } from './ffmpegRenderer.js';
+import { sanitizeSpokenNarration } from './narrationSanitizer.js';
+import {
+  autoBgmMoodForNiche,
+  generateProceduralBgmTrack,
+  generateTransitionSfxAssets,
+  normalizeBgmMood,
+} from './soundDesignService.js';
 import { synthesizeNarration, type VoiceProviderName } from './voiceService.js';
+import {
+  alignNarrationWithGroqWhisper,
+  trimAudioDeadAir,
+  type WordTimestamp,
+} from './whisperAlignService.js';
 import { uploadVideoToYouTubeResumable } from './youtubeService.js';
 
 export type PipelineStage =
@@ -173,7 +187,27 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
       youtube_account_id?: string | null;
       media_source_mode?: MediaSourceMode;
       custom_media_urls?: string[];
+      editing_pace?: string;
+      bgm_mood?: string;
+      sfx_enabled?: boolean;
+      color_grade?: string;
+      whisper_sync?: boolean;
+      hook_style?: 'viral_retention' | 'story_arc' | 'standard';
+      hook_banner?: boolean;
     };
+
+    const editingPace = normalizeEditingPace(
+      uploadCfgTop.editing_pace || (project.format === '9:16' ? 'viral_fast' : 'balanced')
+    );
+    const colorGrade = normalizeColorGrade(uploadCfgTop.color_grade || 'vibrant');
+    const bgmMood =
+      !uploadCfgTop.bgm_mood || uploadCfgTop.bgm_mood === 'auto'
+        ? autoBgmMoodForNiche(project.niche)
+        : normalizeBgmMood(uploadCfgTop.bgm_mood);
+    const sfxEnabled = uploadCfgTop.sfx_enabled !== false;
+    const whisperSyncEnabled = uploadCfgTop.whisper_sync !== false;
+    const hookStyle = uploadCfgTop.hook_style || 'viral_retention';
+    const hookBannerEnabled = uploadCfgTop.hook_banner !== false;
 
     // =========================================================================
     // FAST PATH: upload_only (User reviewed & approved the already-rendered MP4)
@@ -346,13 +380,14 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
       .maybeSingle();
 
     if (!shouldSkipStage(completedStages, 'generating_script') || !latestScript) {
-      await updateJobStage(job.id, project.id, 'generating_script', 18, 'Writing duration-matched narration script', completedStages);
+      await updateJobStage(job.id, project.id, 'generating_script', 18, 'Writing high-retention viral narration script', completedStages);
       const generated = await generateScriptWithAI(ai, {
         topic: resolvedTopic,
         niche: project.niche,
         language: project.language,
         contentStyle: project.content_style,
         durationSeconds: project.duration_seconds,
+        hookStyle,
         references,
       });
 
@@ -415,7 +450,7 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
       .order('scene_number', { ascending: true });
 
     if (!shouldSkipStage(completedStages, 'generating_scenes') || !scenes || scenes.length === 0) {
-      await updateJobStage(job.id, project.id, 'generating_scenes', 28, 'Breaking script into visual scenes & search queries', completedStages);
+      await updateJobStage(job.id, project.id, 'generating_scenes', 28, 'Breaking script into fast-paced visual scenes', completedStages);
       const breakdown = await generateSceneBreakdownWithAI(ai, {
         narrationText: latestScript.narration_text || latestScript.script_text,
         topic: resolvedTopic,
@@ -423,6 +458,7 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
         language: project.language,
         durationSeconds: project.duration_seconds,
         format: project.format,
+        editingPace,
       });
 
       await supabase.from('scenes').delete().eq('project_id', project.id).eq('user_id', job.user_id);
@@ -639,14 +675,18 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
     }
 
     if (!localNarrationPath) {
-      await updateJobStage(job.id, project.id, 'generating_voice', 62, 'Synthesizing narration voice-over', completedStages);
+      await updateJobStage(job.id, project.id, 'generating_voice', 62, 'Synthesizing clean voice-over (spoken text only)', completedStages);
+      const cleanNarrationText =
+        sanitizeSpokenNarration(latestScript.narration_text || latestScript.script_text) ||
+        latestScript.narration_text ||
+        latestScript.script_text;
       const voiceResult = await synthesizeNarration({
         userId: job.user_id,
         projectId: project.id,
-        text: latestScript.narration_text || latestScript.script_text,
+        text: cleanNarrationText,
         language: project.language,
         preferredProvider: (project.voice_provider as VoiceProviderName) || 'gemini_tts',
-        voiceId: project.voice_id || 'Kore',
+        voiceId: project.voice_id || 'Charon',
         speed: Number(project.voice_speed || 1.0),
         workDir,
       });
@@ -663,9 +703,32 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
     }
 
     // =========================================================================
-    // STAGE 7 & 8: Timeline Preparation + FFmpeg Rendering + Persistent Upload
+    // STAGE 7 & 8: Dead-Air Trim + Whisper Word Sync + Sound Design + FFmpeg Render
     // =========================================================================
-    await updateJobStage(job.id, project.id, 'preparing_timeline', 68, 'Synchronizing scenes, audio, and subtitles', completedStages);
+    await updateJobStage(job.id, project.id, 'preparing_timeline', 68, 'Trimming dead air & aligning captions via Whisper', completedStages);
+
+    if (whisperSyncEnabled || editingPace === 'viral_fast') {
+      const trimmed = await trimAudioDeadAir({
+        workDir,
+        inputAudioPath: localNarrationPath,
+        originalDurationSec: narrationDurationSec,
+      });
+      localNarrationPath = trimmed.audioPath;
+      narrationDurationSec = trimmed.durationSec;
+    }
+
+    let whisperWords: WordTimestamp[] = [];
+    if (whisperSyncEnabled) {
+      const aligned = await alignNarrationWithGroqWhisper({
+        userId: job.user_id,
+        audioPath: localNarrationPath,
+        language: project.language,
+      });
+      if (aligned?.words?.length) {
+        whisperWords = aligned.words;
+      }
+    }
+
     markStageDone('preparing_timeline');
 
     await recordNotification({
@@ -673,13 +736,13 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
       projectId: project.id,
       jobId: job.id,
       eventType: 'rendering_started',
-      title: 'Rendering video',
-      body: `FFmpeg worker started rendering "${project.title || resolvedTopic}".`,
+      title: 'Rendering viral edit',
+      body: `FFmpeg worker started ${editingPace.replace('_', ' ')} render for "${project.title || resolvedTopic}".`,
     });
 
-    await updateJobStage(job.id, project.id, 'rendering', 74, 'Encoding H.264/AAC MP4 with FFmpeg', completedStages);
+    await updateJobStage(job.id, project.id, 'rendering', 74, 'Mixing BGM/SFX & encoding crisp 30fps MP4', completedStages);
 
-    // Optional licensed/user background music
+    // Optional licensed/user background music OR built-in mood BGM bed
     let localMusicPath: string | null = null;
     const musicCfg = (project.music_config || {}) as {
       enabled?: boolean;
@@ -706,6 +769,22 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
       }
     }
 
+    if (!localMusicPath && bgmMood !== 'none') {
+      localMusicPath = await generateProceduralBgmTrack({
+        workDir,
+        mood: bgmMood,
+        durationSec: Math.min(36, Math.max(15, narrationDurationSec)),
+      });
+    }
+
+    const sfxAssets = sfxEnabled
+      ? await generateTransitionSfxAssets(workDir)
+      : { hookBoomPath: null, whooshPath: null };
+
+    const hookBannerText = hookBannerEnabled
+      ? sanitizeSpokenNarration(latestScript.title_idea || latestScript.hook || project.title || resolvedTopic)
+      : null;
+
     const subCfgRaw = (project.subtitle_style || {}) as Record<string, unknown>;
     const subtitleStyle: SubtitleStyleConfig = {
       enabled: subCfgRaw.enabled !== false,
@@ -731,10 +810,17 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
       format: project.format,
       qualityPreset: project.quality_preset === '720p' ? '720p' : '1080p',
       subtitleStyle,
+      editingPace,
+      colorGrade,
+      hookBannerText,
+      whisperWords,
       backgroundMusicPath: localMusicPath,
-      musicVolume: musicCfg.music_volume,
-      narrationVolume: musicCfg.narration_volume,
-      duckingEnabled: musicCfg.ducking_enabled,
+      musicVolume: musicCfg.music_volume ?? 0.16,
+      narrationVolume: musicCfg.narration_volume ?? 1.05,
+      duckingEnabled: musicCfg.ducking_enabled ?? true,
+      sfxEnabled,
+      hookBoomPath: sfxAssets.hookBoomPath,
+      whooshPath: sfxAssets.whooshPath,
     });
 
     let videoStoragePath: string | null = `${job.user_id}/${project.id}/final_${Date.now()}.mp4`;
@@ -778,7 +864,7 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
     markStageDone('rendering');
 
     // =========================================================================
-    // STAGE 9: SEO Metadata Generation + Thumbnail Generation
+    // STAGE 9: SEO Metadata Generation + High-CTR Thumbnail Generation
     // =========================================================================
     await updateJobStage(job.id, project.id, 'generating_metadata', 85, 'Generating YouTube title, description, tags & SEO', completedStages);
     let seo: GeneratedSeoMetadata = (project.seo_metadata || {}) as GeneratedSeoMetadata;
@@ -794,11 +880,12 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
       markStageDone('generating_metadata');
     }
 
-    await updateJobStage(job.id, project.id, 'generating_thumbnail', 89, 'Compositing 16:9 high-contrast thumbnail', completedStages);
+    await updateJobStage(job.id, project.id, 'generating_thumbnail', 89, 'Compositing 16:9 high-CTR viral thumbnail', completedStages);
     const localThumbPath = await generateThumbnailFromVideo({
       workDir,
       videoPath: rendered.finalVideoPath,
       headlineText: seo.thumbnailHeadline || seo.title,
+      seekSec: Math.min(5, Math.max(1.2, rendered.durationSec * 0.25)),
     });
     const thumbStoragePath = `${job.user_id}/${project.id}/thumbnail_${Date.now()}.jpg`;
     const thumbBytes = await fs.readFile(localThumbPath);

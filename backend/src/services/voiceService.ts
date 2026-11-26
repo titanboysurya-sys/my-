@@ -1,11 +1,12 @@
+import os from 'node:os';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { config, sanitizeErrorMessage } from '../config/env.js';
 import { uploadToStorageWithAutoBucket } from '../db/supabase.js';
 import { resolveConfinedPath } from '../security/urlGuard.js';
-import { resolveLanguageMeta } from './aiProvider.js';
 import { resolveUserProviderKey } from './credentialService.js';
+import { sanitizeSpokenNarration } from './narrationSanitizer.js';
 import {
   isModelRetiredOrUnsupportedError,
   markGeminiTtsModelRetired,
@@ -496,6 +497,12 @@ export interface VoiceSynthesisResult {
 export async function synthesizeNarration(
   req: VoiceSynthesisRequest
 ): Promise<VoiceSynthesisResult> {
+  const cleanText = sanitizeSpokenNarration(req.text);
+  if (!cleanText) {
+    throw new Error('Spoken narration script is empty after removing non-spoken stage cues.');
+  }
+  const cleanReq: VoiceSynthesisRequest = { ...req, text: cleanText };
+
   const providerOrder: VoiceProviderName[] =
     req.preferredProvider === 'elevenlabs'
       ? ['elevenlabs', 'gemini_tts']
@@ -507,8 +514,8 @@ export async function synthesizeNarration(
     try {
       const audio =
         provider === 'elevenlabs'
-          ? await generateWithElevenLabs(req)
-          : await generateWithGeminiTts(req);
+          ? await generateWithElevenLabs(cleanReq)
+          : await generateWithGeminiTts(cleanReq);
 
       const localAudioPath = resolveConfinedPath(req.workDir, `narration.${audio.ext}`);
       await fs.writeFile(localAudioPath, audio.buffer);
@@ -586,6 +593,32 @@ async function generateWithElevenLabs(
   return { buffer, ext: 'mp3', mimeType: 'audio/mpeg' };
 }
 
+async function applyAudioTempoBuffer(
+  buffer: Buffer,
+  ext: string,
+  speed: number
+): Promise<Buffer> {
+  if (Math.abs(speed - 1.0) <= 0.03) return buffer;
+  const clamped = Math.max(0.75, Math.min(1.4, speed));
+  const tmpPrefix = `${os.tmpdir()}/tts_tempo_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const inPath = `${tmpPrefix}_in.${ext}`;
+  const outPath = `${tmpPrefix}_out.${ext}`;
+  try {
+    await fs.writeFile(inPath, buffer);
+    await execFileAsync(
+      config.ffmpegPath,
+      ['-y', '-i', inPath, '-af', `atempo=${clamped.toFixed(2)}`, outPath],
+      { timeout: 25_000 }
+    );
+    return await fs.readFile(outPath);
+  } catch {
+    return buffer;
+  } finally {
+    await fs.rm(inPath, { force: true }).catch(() => undefined);
+    await fs.rm(outPath, { force: true }).catch(() => undefined);
+  }
+}
+
 async function generateWithGeminiTts(
   req: VoiceSynthesisRequest
 ): Promise<{ buffer: Buffer; ext: string; mimeType: string }> {
@@ -598,13 +631,15 @@ async function generateWithGeminiTts(
   const voiceName = profile.geminiVoiceName;
   const speedClamped = Math.max(0.75, Math.min(1.4, Number(req.speed || 1.0)));
 
-  const langMeta = resolveLanguageMeta(req.language);
+  // Send ONLY the clean spoken text to Gemini TTS — never wrap with natural-language prompt
+  // instructions ("Read the following aloud..."), because TTS models speak prompt wrappers out loud!
+  const pureSpokenText = sanitizeSpokenNarration(req.text) || req.text.trim();
   const requestBody = JSON.stringify({
     contents: [
       {
         parts: [
           {
-            text: `Read the following narration aloud naturally in ${langMeta.ttsName} using ${profile.style} with authentic native pronunciation and ${speedClamped}x pacing. Speak ONLY the script text below without adding any extra words:\n\n${req.text}`,
+            text: pureSpokenText,
           },
         ],
       },
@@ -693,13 +728,19 @@ async function generateWithGeminiTts(
     if (mime.includes('l16') || mime.includes('pcm')) {
       const rateMatch = mime.match(/rate=(\d+)/);
       const sampleRate = rateMatch ? Number(rateMatch[1]) : 24000;
-      const wavBuffer = wrapPcm16AsWav(rawBytes, sampleRate, 1);
+      const wavBuffer = await applyAudioTempoBuffer(
+        wrapPcm16AsWav(rawBytes, sampleRate, 1),
+        'wav',
+        speedClamped
+      );
       return { buffer: wavBuffer, ext: 'wav', mimeType: 'audio/wav' };
     }
     if (mime.includes('mp3') || mime.includes('mpeg')) {
-      return { buffer: rawBytes, ext: 'mp3', mimeType: 'audio/mpeg' };
+      const sizedMp3 = await applyAudioTempoBuffer(rawBytes, 'mp3', speedClamped);
+      return { buffer: sizedMp3, ext: 'mp3', mimeType: 'audio/mpeg' };
     }
-    return { buffer: rawBytes, ext: 'wav', mimeType: 'audio/wav' };
+    const sizedWav = await applyAudioTempoBuffer(rawBytes, 'wav', speedClamped);
+    return { buffer: sizedWav, ext: 'wav', mimeType: 'audio/wav' };
   }
 
   if (sawRateLimit) {

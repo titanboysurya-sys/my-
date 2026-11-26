@@ -22,10 +22,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Link
+import androidx.compose.material.icons.rounded.MusicNote
+import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.RecordVoiceOver
+import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.Subtitles
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -669,6 +673,217 @@ fun MediaSourceAndLinksSection(
             style = MaterialTheme.typography.labelSmall,
             color = if (parsedLinks.isNotEmpty()) StudioEmerald else MaterialTheme.colorScheme.onSurfaceVariant
         )
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun ViralProductionControlsSection(
+    editingPace: String,
+    bgmMood: String,
+    sfxEnabled: Boolean,
+    colorGrade: String,
+    whisperSync: Boolean,
+    hookBannerEnabled: Boolean,
+    onEditingPaceChange: (String) -> Unit,
+    onBgmMoodChange: (String) -> Unit,
+    onSfxEnabledChange: (Boolean) -> Unit,
+    onColorGradeChange: (String) -> Unit,
+    onWhisperSyncChange: (Boolean) -> Unit,
+    onHookBannerEnabledChange: (Boolean) -> Unit,
+    showHookStyleSelector: Boolean = false,
+    hookStyle: String = "viral_retention",
+    onHookStyleChange: ((String) -> Unit)? = null,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                imageVector = Icons.Rounded.AutoAwesome,
+                contentDescription = null,
+                tint = SignalCrimson,
+                modifier = Modifier.size(20.dp)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Column {
+                Text("Viral Editing, Sound & Color Studio", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    text = "Fast dynamic cuts, auto-ducked BGM, SFX hits, color grading & Whisper word sync",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+
+        // Editing Pace
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Rounded.Speed, contentDescription = null, tint = PipelineCyan, modifier = Modifier.size(16.dp))
+            Spacer(modifier = Modifier.width(6.dp))
+            Text("Editing Pace & Motion", style = MaterialTheme.typography.labelLarge)
+        }
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            listOf(
+                "viral_fast" to "Viral Fast Cuts (2.4s)",
+                "balanced" to "Balanced (3.4s)",
+                "cinematic" to "Cinematic (4.8s)"
+            ).forEach { (id, label) ->
+                FilterChip(
+                    selected = editingPace == id,
+                    onClick = { onEditingPaceChange(id) },
+                    label = { Text(label) },
+                    modifier = Modifier.testTag("viral_pace_$id")
+                )
+            }
+        }
+
+        // Background Music Mood
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Rounded.MusicNote, contentDescription = null, tint = StudioEmerald, modifier = Modifier.size(16.dp))
+            Spacer(modifier = Modifier.width(6.dp))
+            Text("Background Music (Auto-Ducked)", style = MaterialTheme.typography.labelLarge)
+        }
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            listOf(
+                "auto" to "Auto Mood",
+                "cinematic" to "Cinematic",
+                "mystery" to "Mystery",
+                "motivational" to "Motivational",
+                "tech" to "Tech",
+                "dark_phonk" to "Dark",
+                "none" to "Off"
+            ).forEach { (id, label) ->
+                FilterChip(
+                    selected = bgmMood == id,
+                    onClick = { onBgmMoodChange(id) },
+                    label = { Text(label) },
+                    modifier = Modifier.testTag("viral_bgm_$id")
+                )
+            }
+        }
+
+        // Color Grading Preset
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Rounded.Palette, contentDescription = null, tint = StudioAmber, modifier = Modifier.size(16.dp))
+            Spacer(modifier = Modifier.width(6.dp))
+            Text("Color Grading", style = MaterialTheme.typography.labelLarge)
+        }
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            listOf(
+                "vibrant" to "Vibrant",
+                "teal_orange" to "Teal & Orange",
+                "dark_moody" to "Dark Moody",
+                "clean" to "Clean"
+            ).forEach { (id, label) ->
+                FilterChip(
+                    selected = colorGrade == id,
+                    onClick = { onColorGradeChange(id) },
+                    label = { Text(label) },
+                    modifier = Modifier.testTag("viral_color_$id")
+                )
+            }
+        }
+
+        if (showHookStyleSelector && onHookStyleChange != null) {
+            Text("Script Retention Formula", style = MaterialTheme.typography.labelLarge)
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                listOf(
+                    "viral_retention" to "Hook + Twist + Loop",
+                    "story_arc" to "Story Arc",
+                    "standard" to "Standard"
+                ).forEach { (id, label) ->
+                    FilterChip(
+                        selected = hookStyle == id,
+                        onClick = { onHookStyleChange(id) },
+                        label = { Text(label) },
+                        modifier = Modifier.testTag("viral_hook_style_$id")
+                    )
+                }
+            }
+        }
+
+        // Sound Effects Toggle
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 48.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                Text("Transition SFX (Whoosh & Boom)", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    text = "Adds hook sub-impact drop and crisp scene cut whooshes",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Switch(
+                checked = sfxEnabled,
+                onCheckedChange = onSfxEnabledChange,
+                modifier = Modifier.testTag("viral_sfx_switch")
+            )
+        }
+
+        // Whisper Word Sync + Dead-Air Removal Toggle
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 48.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                Text("Whisper Word Sync & Dead-Air Cut", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    text = "Trims silent pauses and locks word pops to exact voice timing",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Switch(
+                checked = whisperSync,
+                onCheckedChange = onWhisperSyncChange,
+                modifier = Modifier.testTag("viral_whisper_sync_switch")
+            )
+        }
+
+        // 0-3s Top Hook Banner Toggle
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 48.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                Text("0-3s Top Hook Banner", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    text = "Shows bold scroll-stopping headline overlay in the first 3 seconds",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Switch(
+                checked = hookBannerEnabled,
+                onCheckedChange = onHookBannerEnabledChange,
+                modifier = Modifier.testTag("viral_hook_banner_switch")
+            )
+        }
     }
 }
 

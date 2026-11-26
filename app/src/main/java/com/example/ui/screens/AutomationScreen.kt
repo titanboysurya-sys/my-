@@ -56,6 +56,7 @@ import com.example.ui.components.STUDIO_SUBTITLE_PRESETS
 import com.example.ui.components.StatusPill
 import com.example.ui.components.StudioSectionHeader
 import com.example.ui.components.StudioTimePickerDialog
+import com.example.ui.components.ViralProductionControlsSection
 import com.example.ui.components.VoiceSelectorSection
 import com.example.ui.components.defaultCountryForLanguage
 import com.example.ui.components.format24hTo12hDisplay
@@ -88,6 +89,13 @@ private data class ChannelAutopilotProfile(
     val uploadPrivacy: String,
     val preferredTopics: String,
     val avoidedTopics: String,
+    val editingPace: String = "viral_fast",
+    val bgmMood: String = "auto",
+    val sfxEnabled: Boolean = true,
+    val colorGrade: String = "vibrant",
+    val whisperSync: Boolean = true,
+    val hookStyle: String = "viral_retention",
+    val hookBannerEnabled: Boolean = true,
     val nextRunAt: String? = null
 )
 
@@ -129,6 +137,13 @@ private fun parseChannelSchedules(
             uploadPrivacy = m["uploadPrivacy"]?.toString() ?: "private",
             preferredTopics = (m["preferredTopics"] as? List<*>)?.joinToString(", ") ?: "",
             avoidedTopics = (m["avoidedTopics"] as? List<*>)?.joinToString(", ") ?: "",
+            editingPace = m["editingPace"]?.toString()?.ifBlank { "viral_fast" } ?: "viral_fast",
+            bgmMood = m["bgmMood"]?.toString()?.ifBlank { "auto" } ?: "auto",
+            sfxEnabled = m["sfxEnabled"] as? Boolean ?: true,
+            colorGrade = m["colorGrade"]?.toString()?.ifBlank { "vibrant" } ?: "vibrant",
+            whisperSync = m["whisperSync"] as? Boolean ?: true,
+            hookStyle = m["hookStyle"]?.toString()?.ifBlank { "viral_retention" } ?: "viral_retention",
+            hookBannerEnabled = m["hookBannerEnabled"] as? Boolean ?: true,
             nextRunAt = m["nextRunAt"]?.toString()
         )
     }
@@ -154,7 +169,14 @@ private fun ChannelAutopilotProfile.toWireMap(): Map<String, Any> = mapOf(
     "autoPublish" to autoPublish,
     "uploadPrivacy" to uploadPrivacy,
     "preferredTopics" to preferredTopics.split(",").map { it.trim() }.filter { it.isNotBlank() },
-    "avoidedTopics" to avoidedTopics.split(",").map { it.trim() }.filter { it.isNotBlank() }
+    "avoidedTopics" to avoidedTopics.split(",").map { it.trim() }.filter { it.isNotBlank() },
+    "editingPace" to editingPace,
+    "bgmMood" to bgmMood,
+    "sfxEnabled" to sfxEnabled,
+    "colorGrade" to colorGrade,
+    "whisperSync" to whisperSync,
+    "hookStyle" to hookStyle,
+    "hookBannerEnabled" to hookBannerEnabled
 )
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -276,6 +298,52 @@ fun AutomationScreen(
         mutableStateOf(
             activeSavedChannel?.autoPublish
                 ?: (existingPrefs["auto_publish"] as? Boolean ?: true)
+        )
+    }
+    var editingPace by remember(existing, selectedChannelId) {
+        mutableStateOf(
+            activeSavedChannel?.editingPace
+                ?: existingPrefs["editing_pace"]?.toString()?.ifBlank { "viral_fast" }
+                ?: "viral_fast"
+        )
+    }
+    var bgmMood by remember(existing, selectedChannelId) {
+        mutableStateOf(
+            activeSavedChannel?.bgmMood
+                ?: existingPrefs["bgm_mood"]?.toString()?.ifBlank { "auto" }
+                ?: "auto"
+        )
+    }
+    var sfxEnabled by remember(existing, selectedChannelId) {
+        mutableStateOf(
+            activeSavedChannel?.sfxEnabled
+                ?: (existingPrefs["sfx_enabled"] as? Boolean ?: true)
+        )
+    }
+    var colorGrade by remember(existing, selectedChannelId) {
+        mutableStateOf(
+            activeSavedChannel?.colorGrade
+                ?: existingPrefs["color_grade"]?.toString()?.ifBlank { "vibrant" }
+                ?: "vibrant"
+        )
+    }
+    var whisperSync by remember(existing, selectedChannelId) {
+        mutableStateOf(
+            activeSavedChannel?.whisperSync
+                ?: (existingPrefs["whisper_sync"] as? Boolean ?: true)
+        )
+    }
+    var hookStyle by remember(existing, selectedChannelId) {
+        mutableStateOf(
+            activeSavedChannel?.hookStyle
+                ?: existingPrefs["hook_style"]?.toString()?.ifBlank { "viral_retention" }
+                ?: "viral_retention"
+        )
+    }
+    var hookBannerEnabled by remember(existing, selectedChannelId) {
+        mutableStateOf(
+            activeSavedChannel?.hookBannerEnabled
+                ?: (existingPrefs["hook_banner"] as? Boolean ?: true)
         )
     }
     var maxConcurrentJobs by remember(existing) {
@@ -408,7 +476,14 @@ fun AutomationScreen(
                                     reviewBeforeUpload = !autoPublish,
                                     privacyStatus = uploadPrivacy,
                                     youtubeAccountId = if (autoPublish) selectedChannelId else null,
-                                    startImmediately = true
+                                    startImmediately = true,
+                                    editingPace = editingPace,
+                                    bgmMood = bgmMood,
+                                    sfxEnabled = sfxEnabled,
+                                    colorGrade = colorGrade,
+                                    whisperSync = whisperSync,
+                                    hookStyle = hookStyle,
+                                    hookBannerEnabled = hookBannerEnabled
                                 )
                             )
                         },
@@ -809,6 +884,25 @@ fun AutomationScreen(
                             )
                         }
                     }
+
+                    ViralProductionControlsSection(
+                        editingPace = editingPace,
+                        bgmMood = bgmMood,
+                        sfxEnabled = sfxEnabled,
+                        colorGrade = colorGrade,
+                        whisperSync = whisperSync,
+                        hookBannerEnabled = hookBannerEnabled,
+                        onEditingPaceChange = { editingPace = it },
+                        onBgmMoodChange = { bgmMood = it },
+                        onSfxEnabledChange = { sfxEnabled = it },
+                        onColorGradeChange = { colorGrade = it },
+                        onWhisperSyncChange = { whisperSync = it },
+                        onHookBannerEnabledChange = { hookBannerEnabled = it },
+                        showHookStyleSelector = true,
+                        hookStyle = hookStyle,
+                        onHookStyleChange = { hookStyle = it },
+                        modifier = Modifier.padding(top = 6.dp)
+                    )
                 }
             }
         }
@@ -844,7 +938,14 @@ fun AutomationScreen(
                             autoPublish = autoPublish,
                             uploadPrivacy = uploadPrivacy,
                             preferredTopics = preferredTopics,
-                            avoidedTopics = avoidedTopics
+                            avoidedTopics = avoidedTopics,
+                            editingPace = editingPace,
+                            bgmMood = bgmMood,
+                            sfxEnabled = sfxEnabled,
+                            colorGrade = colorGrade,
+                            whisperSync = whisperSync,
+                            hookStyle = hookStyle,
+                            hookBannerEnabled = hookBannerEnabled
                         )
                     }
 
@@ -856,6 +957,13 @@ fun AutomationScreen(
                         "subtitle_style" to subtitleStyle,
                         "upload_privacy" to uploadPrivacy,
                         "auto_publish" to autoPublish,
+                        "editing_pace" to editingPace,
+                        "bgm_mood" to bgmMood,
+                        "sfx_enabled" to sfxEnabled,
+                        "color_grade" to colorGrade,
+                        "whisper_sync" to whisperSync,
+                        "hook_style" to hookStyle,
+                        "hook_banner" to hookBannerEnabled,
                         "max_concurrent_jobs" to maxConcurrentJobs,
                         "max_retries" to maxRetries
                     )

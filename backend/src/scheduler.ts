@@ -24,6 +24,13 @@ export interface ChannelScheduleConfig {
   avoidedTopics?: string[];
   contentStyle?: string;
   qualityPreset?: '720p' | '1080p';
+  editingPace?: string;
+  bgmMood?: string;
+  sfxEnabled?: boolean;
+  colorGrade?: string;
+  whisperSync?: boolean;
+  hookStyle?: string;
+  hookBannerEnabled?: boolean;
   nextRunAt?: string | null;
   lastRunAt?: string | null;
 }
@@ -374,6 +381,13 @@ export async function runSchedulerTick(): Promise<{ enqueued: number; skipped: n
                 scheduled_publish_time: null,
                 youtube_account_id: cs.channelId,
                 media_source_mode: 'all',
+                editing_pace: String(cs.editingPace || prefs.editing_pace || 'viral_fast'),
+                bgm_mood: String(cs.bgmMood || prefs.bgm_mood || 'auto'),
+                sfx_enabled: cs.sfxEnabled !== undefined ? Boolean(cs.sfxEnabled) : prefs.sfx_enabled !== false,
+                color_grade: String(cs.colorGrade || prefs.color_grade || 'vibrant'),
+                whisper_sync: cs.whisperSync !== undefined ? Boolean(cs.whisperSync) : prefs.whisper_sync !== false,
+                hook_style: String(cs.hookStyle || prefs.hook_style || 'viral_retention'),
+                hook_banner: cs.hookBannerEnabled !== undefined ? Boolean(cs.hookBannerEnabled) : prefs.hook_banner !== false,
               },
               status: 'queued',
             })
@@ -474,6 +488,13 @@ export async function runSchedulerTick(): Promise<{ enqueued: number; skipped: n
             scheduled_publish_time: null,
             youtube_account_id: targetChannelId || null,
             media_source_mode: 'all',
+            editing_pace: String(prefs.editing_pace || 'viral_fast'),
+            bgm_mood: String(prefs.bgm_mood || 'auto'),
+            sfx_enabled: prefs.sfx_enabled !== false,
+            color_grade: String(prefs.color_grade || 'vibrant'),
+            whisper_sync: prefs.whisper_sync !== false,
+            hook_style: String(prefs.hook_style || 'viral_retention'),
+            hook_banner: prefs.hook_banner !== false,
           },
           status: 'queued',
         })

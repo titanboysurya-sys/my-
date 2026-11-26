@@ -3,6 +3,8 @@ import fs from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { config } from '../config/env.js';
 import { resolveConfinedPath } from '../security/urlGuard.js';
+import { sanitizeSpokenNarration } from './narrationSanitizer.js';
+import { mapScriptWordsToWhisperTimings, type WordTimestamp } from './whisperAlignService.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -21,6 +23,9 @@ export type SubtitlePresetId =
   | 'neon_glow'
   | 'cinematic_gold'
   | 'classic';
+
+export type EditingPacePreset = 'viral_fast' | 'balanced' | 'cinematic';
+export type ColorGradePreset = 'vibrant' | 'dark_moody' | 'teal_orange' | 'clean';
 
 export interface SubtitleStyleConfig {
   enabled: boolean;
@@ -41,10 +46,17 @@ export interface RenderVideoRequest {
   format: '9:16' | '16:9' | '1:1';
   qualityPreset: '720p' | '1080p';
   subtitleStyle: SubtitleStyleConfig;
+  editingPace?: EditingPacePreset;
+  colorGrade?: ColorGradePreset;
+  hookBannerText?: string | null;
+  whisperWords?: WordTimestamp[];
   backgroundMusicPath?: string | null;
   musicVolume?: number;
   narrationVolume?: number;
   duckingEnabled?: boolean;
+  sfxEnabled?: boolean;
+  hookBoomPath?: string | null;
+  whooshPath?: string | null;
 }
 
 export interface RenderVideoOutput {
@@ -281,16 +293,67 @@ function sanitizeAssWord(word: string, uppercaseLatin: boolean): string {
   return uppercaseLatin && !hasNonLatin ? cleaned.toUpperCase() : cleaned;
 }
 
+export function normalizeEditingPace(raw?: string | null): EditingPacePreset {
+  switch ((raw || '').trim().toLowerCase()) {
+    case 'balanced':
+    case 'normal':
+      return 'balanced';
+    case 'cinematic':
+    case 'slow':
+      return 'cinematic';
+    case 'viral_fast':
+    case 'fast':
+    default:
+      return 'viral_fast';
+  }
+}
+
+export function normalizeColorGrade(raw?: string | null): ColorGradePreset {
+  switch ((raw || '').trim().toLowerCase()) {
+    case 'dark_moody':
+    case 'dark':
+    case 'moody':
+      return 'dark_moody';
+    case 'teal_orange':
+    case 'cinematic':
+      return 'teal_orange';
+    case 'clean':
+    case 'natural':
+      return 'clean';
+    case 'vibrant':
+    default:
+      return 'vibrant';
+  }
+}
+
+export function buildColorGradeFilter(grade: ColorGradePreset): string {
+  switch (grade) {
+    case 'dark_moody':
+      return 'eq=contrast=1.14:saturation=0.92:brightness=-0.02,colorbalance=bs=0.06:ms=-0.02:hs=-0.04,unsharp=5:5:0.45:5:5:0.0,vignette=PI/4.8';
+    case 'teal_orange':
+      return 'colorbalance=rs=-0.06:gs=0.02:bs=0.08:rh=0.09:gh=0.02:bh=-0.07,eq=contrast=1.10:saturation=1.15,unsharp=5:5:0.40:5:5:0.0,vignette=PI/6';
+    case 'clean':
+      return 'eq=contrast=1.04:saturation=1.07,unsharp=3:3:0.30:3:3:0.0';
+    case 'vibrant':
+    default:
+      return 'eq=contrast=1.09:saturation=1.20:brightness=0.01,unsharp=5:5:0.45:5:5:0.0,vignette=PI/6';
+  }
+}
+
 /**
  * Generates an Advanced SubStation Alpha (.ass) subtitle file with explicit PlayResX/PlayResY
- * matching the output video dimensions and viral word-by-word color highlighting
- * (MrBeast, Hormozi, Neon Cyber, Cinematic Gold, Classic Clean).
+ * matching the output video dimensions, optional Whisper word-level audio alignment,
+ * optional 0-3s top-safe Hook Banner, and viral word-by-word color highlighting.
  */
 export function buildSynchronizedAss(
   clips: TimelineSceneClip[],
   width: number,
   height: number,
-  style: SubtitleStyleConfig
+  style: SubtitleStyleConfig,
+  options?: {
+    whisperWords?: WordTimestamp[];
+    hookBannerText?: string | null;
+  }
 ): string {
   const isVertical = height > width;
   const isSquare = Math.abs(height - width) < 40;
@@ -332,6 +395,9 @@ export function buildSynchronizedAss(
   const outlineAss = hexToAssColor(resolved.outlineHex, '00');
   const highlightAssList = resolved.highlightColorsHex.map((hex) => hexToAssColor(hex, '00'));
 
+  const hookFontSize = Math.max(22, Math.round(fontSize * 0.62));
+  const hookMarginV = isVertical ? Math.round(height * 0.08) : Math.round(height * 0.06);
+
   const header = [
     '[Script Info]',
     'ScriptType: v4.00+',
@@ -343,6 +409,7 @@ export function buildSynchronizedAss(
     '[V4+ Styles]',
     'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
     `Style: Default,Noto Sans,${fontSize},${primaryAss},${highlightAssList[0]},${outlineAss},${resolved.backAss},-1,0,0,0,100,100,0,0,${resolved.borderStyle},${outlinePx},${shadowPx},${alignment},${marginH},${marginH},${marginV},1`,
+    `Style: HookBanner,Noto Sans,${hookFontSize},&H0000E6FF,&H00FFFFFF,&H00000000,&HB0090D16,-1,0,0,0,100,100,0,0,3,${Math.max(2, Math.round(hookFontSize * 0.14))},0,8,${marginH},${marginH},${hookMarginV},1`,
     '',
     '[Events]',
     'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text',
@@ -350,11 +417,24 @@ export function buildSynchronizedAss(
 
   const maxWords = isVertical ? resolved.maxWordsVertical : resolved.maxWordsHorizontal;
   const dialogueLines: string[] = [];
+
+  const cleanBanner = sanitizeSpokenNarration(options?.hookBannerText || '')
+    .replace(/[{}\\]/g, '')
+    .trim();
+  if (cleanBanner) {
+    const bannerOut = (/[^\x00-\x7F]/.test(cleanBanner) ? cleanBanner : cleanBanner.toUpperCase()).slice(0, 56);
+    dialogueLines.push(
+      `Dialogue: 1,0:00:00.00,0:00:03.10,HookBanner,,0,0,0,,{\\fad(120,220)}${bannerOut}`
+    );
+  }
+
+  const whisperWords = options?.whisperWords || [];
   let cursorSec = 0;
   let globalWordIdx = 0;
 
   for (const clip of clips) {
-    const chunks = splitCaptionChunks(clip.subtitleText, maxWords);
+    const cleanSubtitle = sanitizeSpokenNarration(clip.subtitleText || '');
+    const chunks = splitCaptionChunks(cleanSubtitle, maxWords);
     if (chunks.length === 0) {
       cursorSec += clip.durationSec;
       continue;
@@ -388,15 +468,21 @@ export function buildSynchronizedAss(
         continue;
       }
 
-      // Word-by-word active color highlight (MrBeast / Hormozi / Neon / Gold)
-      const wordCharTotal = chunkWords.reduce((acc, w) => acc + Math.max(2, w.length), 0);
-      let wordCursor = cursorSec;
-      const chunkEnd = cursorSec + sliceSec;
+      // Word-by-word active color highlight locked to Whisper voice timestamps when available
+      const alignedTimings = mapScriptWordsToWhisperTimings(
+        chunkWords,
+        whisperWords,
+        cursorSec,
+        cursorSec + sliceSec
+      );
 
       for (let wi = 0; wi < chunkWords.length; wi++) {
-        const wordDur = (Math.max(2, chunkWords[wi].length) / wordCharTotal) * sliceSec;
-        const wStart = wordCursor;
-        const wEnd = wi === chunkWords.length - 1 ? Math.max(wStart + 0.14, chunkEnd - 0.02) : wordCursor + wordDur;
+        const timing = alignedTimings[wi];
+        const wStart = timing.startSec;
+        const wEnd =
+          wi === chunkWords.length - 1
+            ? Math.max(wStart + 0.14, cursorSec + sliceSec - 0.02)
+            : timing.endSec;
         const hlColor = highlightAssList[(globalWordIdx + wi) % highlightAssList.length];
         const popTag =
           resolved.wordPopScale > 100
@@ -410,7 +496,6 @@ export function buildSynchronizedAss(
         dialogueLines.push(
           `Dialogue: 0,${formatAssTime(wStart)},${formatAssTime(wEnd)},Default,,0,0,0,,${renderedLine}`
         );
-        wordCursor += wordDur;
       }
 
       globalWordIdx += chunkWords.length;
@@ -473,8 +558,9 @@ export async function renderVideoWithFfmpeg(
   const lowMem = isLowMemoryRenderEnv();
   const effectiveQuality: '720p' | '1080p' = lowMem ? '720p' : req.qualityPreset;
   const { width, height } = resolveOutputDimensions(req.format, effectiveQuality);
-  const fps = lowMem ? 24 : 30;
-  const x264Preset = lowMem ? 'ultrafast' : 'veryfast';
+  // Smooth 30fps even on Render Starter containers; use 'superfast' for visibly cleaner frames
+  const fps = 30;
+  const x264Preset = lowMem ? 'superfast' : 'veryfast';
   const threadFlags = lowMem
     ? ['-threads', '1', '-filter_threads', '1', '-filter_complex_threads', '1']
     : ['-threads', '2'];
@@ -482,49 +568,77 @@ export async function renderVideoWithFfmpeg(
     ? ['-x264-params', 'rc-lookahead=8:ref=1:bframes=0:sync-lookahead=0:threads=1', '-bufsize', '2M']
     : ['-x264-params', 'rc-lookahead=20:threads=2'];
 
+  const pace = normalizeEditingPace(req.editingPace);
+  const colorGrade = normalizeColorGrade(req.colorGrade);
+  const gradeFilter = buildColorGradeFilter(colorGrade);
+
   const targetTotal = Math.max(req.totalNarrationDurationSec, 5);
   const scaledClips = calibrateClipDurations(req.clips, targetTotal);
 
-  // 1. Write synchronized SRT (for export) and resolution-accurate ASS (for burn-in)
+  // 1. Write synchronized SRT (for export) and resolution-accurate ASS (with Whisper word sync + Hook Banner)
   const srtPath = resolveConfinedPath(req.workDir, 'subtitles.srt');
   const assPath = resolveConfinedPath(req.workDir, 'subtitles.ass');
   const srtContent = buildSynchronizedSrt(scaledClips);
-  const assContent = buildSynchronizedAss(scaledClips, width, height, req.subtitleStyle);
+  const assContent = buildSynchronizedAss(scaledClips, width, height, req.subtitleStyle, {
+    whisperWords: req.whisperWords,
+    hookBannerText: req.hookBannerText,
+  });
   await Promise.all([
     fs.writeFile(srtPath, srtContent, 'utf8'),
     fs.writeFile(assPath, assContent, 'utf8'),
   ]);
 
-  // 2. Normalize every scene clip to consistent resolution, fps, yuv420p, smooth motion, and exact duration
+  // 2. Normalize every scene clip with energetic dynamic camera motion, cinematic color grade, and zero sluggish black dips
   const normalizedPaths: string[] = [];
+  const sceneCutOffsetsSec: number[] = [];
+  let timelineCursor = 0;
+
   for (let idx = 0; idx < scaledClips.length; idx++) {
     const clip = scaledClips[idx];
+    if (idx > 0) {
+      sceneCutOffsetsSec.push(timelineCursor);
+    }
+    timelineCursor += clip.durationSec;
+
     const outSegment = resolveConfinedPath(
       req.workDir,
       `seg_${String(clip.sceneNumber).padStart(3, '0')}.mp4`
     );
-    const fadeDur = Math.min(0.2, clip.durationSec * 0.12);
-    const fadeOutStart = Math.max(0, clip.durationSec - fadeDur);
+
+    const transitionLower = (clip.transition || '').toLowerCase();
+    const useSubtleWhiteFlash =
+      pace === 'viral_fast' && idx > 0 && (transitionLower === 'flash' || idx % 3 === 0);
+    const useCinematicFade = pace === 'cinematic';
+    const fadeDur = useCinematicFade ? Math.min(0.18, clip.durationSec * 0.1) : 0;
 
     if (clip.mediaType === 'image') {
       const frames = Math.max(fps, Math.round(clip.durationSec * fps));
-      // Keep zoompan source frame close to output size (never 2x/4K) to stay well under 512 MB RAM
-      const zpW = Math.ceil((width * 1.16) / 2) * 2;
-      const zpH = Math.ceil((height * 1.16) / 2) * 2;
-      // Alternate gentle zoom-in and zoom-out across the full clip duration so images never freeze
+      // Keep zoompan source frame close to output size to stay well under 512 MB RAM
+      const zpW = Math.ceil((width * 1.18) / 2) * 2;
+      const zpH = Math.ceil((height * 1.18) / 2) * 2;
+      // Snappy zoom-in / zoom-out punch on alternating image scenes
+      const zoomRange = pace === 'viral_fast' ? '0.16' : '0.12';
       const zoomExpr =
         idx % 2 === 0
-          ? `1.0+(0.14*on/${frames})`
-          : `1.14-(0.14*on/${frames})`;
-      const vf = [
+          ? `1.0+(${zoomRange}*on/${frames})`
+          : `1.16-(${zoomRange}*on/${frames})`;
+      const panXExpr =
+        idx % 3 === 1
+          ? `iw/2-(iw/zoom/2)+(on/${frames})*24-12`
+          : `iw/2-(iw/zoom/2)`;
+      const filters = [
         `scale=${zpW}:${zpH}:force_original_aspect_ratio=increase`,
         `crop=${zpW}:${zpH}`,
-        `zoompan=z='${zoomExpr}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${width}x${height}:fps=${fps}`,
-        'eq=contrast=1.04:saturation=1.08',
-        `fade=t=in:st=0:d=${fadeDur.toFixed(2)}`,
-        `fade=t=out:st=${fadeOutStart.toFixed(2)}:d=${fadeDur.toFixed(2)}`,
-        'format=yuv420p',
-      ].join(',');
+        `zoompan=z='${zoomExpr}':x='${panXExpr}':y='ih/2-(ih/zoom/2)':d=${frames}:s=${width}x${height}:fps=${fps}`,
+        gradeFilter,
+      ];
+      if (useSubtleWhiteFlash) {
+        filters.push('fade=t=in:st=0:d=0.07:color=white@0.45');
+      } else if (useCinematicFade && fadeDur > 0.04) {
+        const fadeOutStart = Math.max(0, clip.durationSec - fadeDur);
+        filters.push(`fade=t=in:st=0:d=${fadeDur.toFixed(2)}`, `fade=t=out:st=${fadeOutStart.toFixed(2)}:d=${fadeDur.toFixed(2)}`);
+      }
+      filters.push('format=yuv420p');
 
       await runFfmpeg([
         '-y',
@@ -536,13 +650,13 @@ export async function renderVideoWithFfmpeg(
         '-t',
         clip.durationSec.toFixed(2),
         '-vf',
-        vf,
+        filters.join(','),
         '-c:v',
         'libx264',
         '-preset',
         x264Preset,
         '-crf',
-        lowMem ? '25' : '23',
+        lowMem ? '23' : '21',
         ...x264MemParams,
         '-max_muxing_queue_size',
         '256',
@@ -550,15 +664,29 @@ export async function renderVideoWithFfmpeg(
         outSegment,
       ]);
     } else {
-      const vf = [
+      const durSafe = Math.max(0.5, clip.durationSec).toFixed(2);
+      // Dynamic punch-zoom motion on video clips as well so static shots feel high-energy
+      const zoomDelta = pace === 'viral_fast' ? 0.08 : 0.05;
+      const zoomScaleExpr =
+        idx % 2 === 0
+          ? `1.0+${zoomDelta}*min(1\\,t/${durSafe})`
+          : `${(1.0 + zoomDelta).toFixed(2)}-${zoomDelta}*min(1\\,t/${durSafe})`;
+
+      const filters = [
         `scale=${width}:${height}:force_original_aspect_ratio=increase`,
         `crop=${width}:${height}`,
         `fps=${fps}`,
-        'eq=contrast=1.03:saturation=1.06',
-        `fade=t=in:st=0:d=${fadeDur.toFixed(2)}`,
-        `fade=t=out:st=${fadeOutStart.toFixed(2)}:d=${fadeDur.toFixed(2)}`,
-        'format=yuv420p',
-      ].join(',');
+        `scale=w='trunc(${width}*(${zoomScaleExpr})/2)*2':h='trunc(${height}*(${zoomScaleExpr})/2)*2':eval=frame`,
+        `crop=${width}:${height}:'(iw-ow)/2':'(ih-oh)/2'`,
+        gradeFilter,
+      ];
+      if (useSubtleWhiteFlash) {
+        filters.push('fade=t=in:st=0:d=0.07:color=white@0.45');
+      } else if (useCinematicFade && fadeDur > 0.04) {
+        const fadeOutStart = Math.max(0, clip.durationSec - fadeDur);
+        filters.push(`fade=t=in:st=0:d=${fadeDur.toFixed(2)}`, `fade=t=out:st=${fadeOutStart.toFixed(2)}:d=${fadeDur.toFixed(2)}`);
+      }
+      filters.push('format=yuv420p');
 
       await runFfmpeg([
         '-y',
@@ -570,13 +698,13 @@ export async function renderVideoWithFfmpeg(
         '-t',
         clip.durationSec.toFixed(2),
         '-vf',
-        vf,
+        filters.join(','),
         '-c:v',
         'libx264',
         '-preset',
         x264Preset,
         '-crf',
-        lowMem ? '25' : '23',
+        lowMem ? '23' : '21',
         ...x264MemParams,
         '-max_muxing_queue_size',
         '256',
@@ -610,7 +738,7 @@ export async function renderVideoWithFfmpeg(
   // Free disk/page-cache pressure from intermediate segment files right away
   await Promise.all(normalizedPaths.map((p) => fs.rm(p, { force: true }).catch(() => undefined)));
 
-  // 4. Final pass: burn resolution-accurate ASS subtitles + mix narration & optional ducked music
+  // 4. Final pass: burn resolution-accurate ASS subtitles + mix narration + ducked BGM + transition SFX
   const finalVideoPath = resolveConfinedPath(req.workDir, 'final_output.mp4');
   const ffmpegArgs: string[] = [
     '-y',
@@ -621,15 +749,33 @@ export async function renderVideoWithFfmpeg(
     req.narrationAudioPath,
   ];
 
+  let nextInputIdx = 2;
+  let musicInputIdx: number | null = null;
+  let boomInputIdx: number | null = null;
+  let whooshInputIdx: number | null = null;
+
   const hasMusic = Boolean(req.backgroundMusicPath);
   if (hasMusic && req.backgroundMusicPath) {
     ffmpegArgs.push('-stream_loop', '-1', '-i', req.backgroundMusicPath);
+    musicInputIdx = nextInputIdx++;
+  }
+
+  const sfxActive = req.sfxEnabled !== false;
+  if (sfxActive && req.hookBoomPath) {
+    ffmpegArgs.push('-i', req.hookBoomPath);
+    boomInputIdx = nextInputIdx++;
+  }
+  if (sfxActive && req.whooshPath && sceneCutOffsetsSec.length > 0) {
+    ffmpegArgs.push('-i', req.whooshPath);
+    whooshInputIdx = nextInputIdx++;
   }
 
   const filterParts: string[] = [];
   let videoMap = '0:v';
   const burnSubtitles =
-    req.subtitleStyle.enabled && req.subtitleStyle.burnIn && srtContent.trim().length > 0;
+    req.subtitleStyle.enabled &&
+    req.subtitleStyle.burnIn &&
+    (srtContent.trim().length > 0 || Boolean(req.hookBannerText));
 
   if (burnSubtitles) {
     const escapedAss = assPath.replace(/\\/g, '/').replace(/:/g, '\\:').replace(/'/g, "\\'");
@@ -637,33 +783,62 @@ export async function renderVideoWithFfmpeg(
     videoMap = '[vout]';
   }
 
-  const narVol = req.narrationVolume ?? 1.0;
-  let audioMap = '1:a';
-  if (hasMusic) {
+  const narVol = req.narrationVolume ?? 1.05;
+  const audioLayers: string[] = ['[nar]'];
+  filterParts.push(`[1:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=${narVol},dynaudnorm=f=150:g=15[nar]`);
+
+  if (musicInputIdx !== null) {
     const musVol = req.musicVolume ?? 0.16;
     const fadeOutStart = Math.max(0, targetTotal - 2);
     if (req.duckingEnabled !== false) {
       filterParts.push(
-        `[1:a]volume=${narVol},dynaudnorm=f=150:g=15[nar]`,
-        `[2:a]volume=${musVol},afade=t=in:st=0:d=1.5,afade=t=out:st=${fadeOutStart.toFixed(
+        `[${musicInputIdx}:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=${musVol},afade=t=in:st=0:d=1.2,afade=t=out:st=${fadeOutStart.toFixed(
           2
         )}:d=2[mus]`,
-        `[mus][nar]sidechaincompress=threshold=0.03:ratio=6:attack=25:release=250[ducked]`,
-        `[nar][ducked]amix=inputs=2:duration=first:dropout_transition=2[aout]`
+        `[mus][nar]sidechaincompress=threshold=0.025:ratio=6:attack=20:release=240[ducked]`
       );
+      audioLayers.push('[ducked]');
     } else {
       filterParts.push(
-        `[1:a]volume=${narVol},dynaudnorm=f=150:g=15[nar]`,
-        `[2:a]volume=${musVol},afade=t=in:st=0:d=1.5,afade=t=out:st=${fadeOutStart.toFixed(
+        `[${musicInputIdx}:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=${musVol},afade=t=in:st=0:d=1.2,afade=t=out:st=${fadeOutStart.toFixed(
           2
-        )}:d=2[mus]`,
-        `[nar][mus]amix=inputs=2:duration=first:dropout_transition=2[aout]`
+        )}:d=2[mus]`
       );
+      audioLayers.push('[mus]');
     }
-    audioMap = '[aout]';
-  } else {
-    // dynaudnorm uses far less RAM than two-pass loudnorm while keeping voice crisp
-    filterParts.push(`[1:a]volume=${narVol},dynaudnorm=f=150:g=15[aout]`);
+  }
+
+  if (boomInputIdx !== null) {
+    filterParts.push(`[${boomInputIdx}:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=0.22[boom]`);
+    audioLayers.push('[boom]');
+  }
+
+  if (whooshInputIdx !== null && sceneCutOffsetsSec.length > 0) {
+    // Cap transition whooshes to max 8 energetic cuts so sound stays punchy, never noisy
+    const step = Math.max(1, Math.ceil(sceneCutOffsetsSec.length / 8));
+    const chosenCuts = sceneCutOffsetsSec.filter((_, i) => i % step === 0).slice(0, 8);
+    if (chosenCuts.length === 1) {
+      const delayMs = Math.max(0, Math.round((chosenCuts[0] - 0.08) * 1000));
+      filterParts.push(
+        `[${whooshInputIdx}:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=0.20,adelay=${delayMs}|${delayMs}[w0]`
+      );
+      audioLayers.push('[w0]');
+    } else if (chosenCuts.length > 1) {
+      const splitLabels = chosenCuts.map((_, idx) => `[ws${idx}]`).join('');
+      filterParts.push(`[${whooshInputIdx}:a]aformat=sample_rates=44100:channel_layouts=stereo,asplit=${chosenCuts.length}${splitLabels}`);
+      chosenCuts.forEach((sec, idx) => {
+        const delayMs = Math.max(0, Math.round((sec - 0.08) * 1000));
+        filterParts.push(`[ws${idx}]volume=0.18,adelay=${delayMs}|${delayMs}[w${idx}]`);
+        audioLayers.push(`[w${idx}]`);
+      });
+    }
+  }
+
+  let audioMap = '[nar]';
+  if (audioLayers.length > 1) {
+    filterParts.push(
+      `${audioLayers.join('')}amix=inputs=${audioLayers.length}:duration=first:normalize=0:dropout_transition=2[aout]`
+    );
     audioMap = '[aout]';
   }
 
@@ -680,7 +855,7 @@ export async function renderVideoWithFfmpeg(
       '-preset',
       x264Preset,
       '-crf',
-      lowMem ? '25' : '22',
+      lowMem ? '23' : '21',
       ...x264MemParams,
       '-pix_fmt',
       'yuv420p'
@@ -754,22 +929,42 @@ export async function generateThumbnailFromVideo(params: {
   workDir: string;
   videoPath: string;
   headlineText: string;
+  seekSec?: number;
 }): Promise<string> {
   const thumbPath = resolveConfinedPath(params.workDir, 'thumbnail_1280x720.jpg');
   const hasNonLatin = /[^\x00-\x7F]/.test(params.headlineText);
-  const safeHeadline = params.headlineText
+  const safeHeadline = sanitizeSpokenNarration(params.headlineText)
     .replace(/[':\\]/g, '')
     .replace(/\s+/g, ' ')
     .trim();
   const formattedHeadline = (hasNonLatin ? safeHeadline : safeHeadline.toUpperCase()).slice(0, 36);
   const fontFile = await resolveThumbnailFontPath(formattedHeadline);
+  const seekPos = Math.max(1.0, Math.min(6.0, params.seekSec ?? 2.4)).toFixed(2);
+
+  // Two-tone stacked viral headline split on half of words for high CTR pop
+  const headlineWords = formattedHeadline.split(' ').filter(Boolean);
+  const mid = Math.ceil(headlineWords.length / 2);
+  const topLine = headlineWords.slice(0, mid).join(' ');
+  const bottomLine = headlineWords.slice(mid).join(' ');
+
+  const textFilters = bottomLine
+    ? [
+        `drawtext=fontfile=${fontFile}:text='${topLine}':fontcolor=0xFFE600:fontsize=64:borderw=5:bordercolor=black:shadowcolor=black@0.85:shadowx=3:shadowy=4:x=(w-text_w)/2:y=505`,
+        `drawtext=fontfile=${fontFile}:text='${bottomLine}':fontcolor=white:fontsize=66:borderw=5:bordercolor=black:shadowcolor=black@0.85:shadowx=3:shadowy=4:x=(w-text_w)/2:y=585`,
+      ]
+    : [
+        `drawtext=fontfile=${fontFile}:text='${topLine}':fontcolor=0xFFE600:fontsize=68:borderw=5:bordercolor=black:shadowcolor=black@0.85:shadowx=3:shadowy=4:x=(w-text_w)/2:y=545`,
+      ];
 
   const vf = [
     'scale=1280:720:force_original_aspect_ratio=increase',
     'crop=1280:720',
-    'eq=contrast=1.15:saturation=1.22:brightness=-0.04',
-    'drawbox=x=0:y=460:w=1280:h=260:color=black@0.62:t=fill',
-    `drawtext=fontfile=${fontFile}:text='${formattedHeadline}':fontcolor=white:fontsize=62:borderw=4:bordercolor=black:x=(w-text_w)/2:y=555`,
+    'eq=contrast=1.22:saturation=1.28:brightness=-0.02',
+    'unsharp=5:5:0.55:5:5:0.0',
+    'vignette=PI/5',
+    'drawbox=x=0:y=420:w=1280:h=300:color=black@0.38:t=fill',
+    'drawbox=x=0:y=495:w=1280:h=225:color=black@0.65:t=fill',
+    ...textFilters,
   ].join(',');
 
   await runFfmpeg([
@@ -777,7 +972,7 @@ export async function generateThumbnailFromVideo(params: {
     '-threads',
     '1',
     '-ss',
-    '00:00:02',
+    seekPos,
     '-i',
     params.videoPath,
     '-frames:v',

@@ -60,6 +60,7 @@ import com.example.ui.components.MediaSourceAndLinksSection
 import com.example.ui.components.StudioSectionHeader
 import com.example.ui.components.StudioTimePickerDialog
 import com.example.ui.components.SubtitleStyleSelectorSection
+import com.example.ui.components.ViralProductionControlsSection
 import com.example.ui.components.VoiceSelectorSection
 import com.example.ui.components.buildUtcIsoFromLocalDateTime
 import com.example.ui.components.defaultCountryForLanguage
@@ -126,6 +127,13 @@ fun CreateVideoScreen(
     var selectedSubtitlePosition by rememberSaveable { mutableStateOf("bottom_safe") }
     var mediaSourceMode by rememberSaveable { mutableStateOf("all") }
     var customMediaLinksText by rememberSaveable { mutableStateOf("") }
+    var editingPace by rememberSaveable { mutableStateOf("viral_fast") }
+    var bgmMood by rememberSaveable { mutableStateOf("auto") }
+    var sfxEnabled by rememberSaveable { mutableStateOf(true) }
+    var colorGrade by rememberSaveable { mutableStateOf("vibrant") }
+    var whisperSync by rememberSaveable { mutableStateOf(true) }
+    var hookStyle by rememberSaveable { mutableStateOf("viral_retention") }
+    var hookBannerEnabled by rememberSaveable { mutableStateOf(true) }
     var autoProduce by rememberSaveable { mutableStateOf(true) }
     var autoUpload by rememberSaveable { mutableStateOf(false) }
     var reviewBeforeUpload by rememberSaveable { mutableStateOf(true) }
@@ -501,6 +509,34 @@ fun CreateVideoScreen(
             }
         }
 
+        // Viral Editing, Sound Design, Color Grading & Whisper Word Sync
+        item {
+            Card(
+                shape = MaterialTheme.shapes.medium,
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+            ) {
+                ViralProductionControlsSection(
+                    editingPace = editingPace,
+                    bgmMood = bgmMood,
+                    sfxEnabled = sfxEnabled,
+                    colorGrade = colorGrade,
+                    whisperSync = whisperSync,
+                    hookBannerEnabled = hookBannerEnabled,
+                    onEditingPaceChange = { editingPace = it },
+                    onBgmMoodChange = { bgmMood = it },
+                    onSfxEnabledChange = { sfxEnabled = it },
+                    onColorGradeChange = { colorGrade = it },
+                    onWhisperSyncChange = { whisperSync = it },
+                    onHookBannerEnabledChange = { hookBannerEnabled = it },
+                    showHookStyleSelector = true,
+                    hookStyle = hookStyle,
+                    onHookStyleChange = { hookStyle = it },
+                    modifier = Modifier.padding(16.dp)
+                )
+            }
+        }
+
         // Production, Target Channel & Scheduled YouTube Upload Options
         item {
             Card(
@@ -712,7 +748,14 @@ fun CreateVideoScreen(
                             youtubeAccountId = if (autoUpload) selectedChannelId else null,
                             mediaSourceMode = mediaSourceMode,
                             customMediaUrls = customUrls.takeIf { it.isNotEmpty() },
-                            startImmediately = true
+                            startImmediately = true,
+                            editingPace = editingPace,
+                            bgmMood = bgmMood,
+                            sfxEnabled = sfxEnabled,
+                            colorGrade = colorGrade,
+                            whisperSync = whisperSync,
+                            hookStyle = hookStyle,
+                            hookBannerEnabled = hookBannerEnabled
                         )
                     )
                 },

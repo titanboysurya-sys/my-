@@ -87,6 +87,7 @@ import com.example.ui.components.StatusPill
 import com.example.ui.components.StudioSectionHeader
 import com.example.ui.components.StudioTimePickerDialog
 import com.example.ui.components.SubtitleStyleSelectorSection
+import com.example.ui.components.ViralProductionControlsSection
 import com.example.ui.components.VoiceSelectorSection
 import com.example.ui.components.buildUtcIsoFromLocalDateTime
 import com.example.ui.components.downloadVideoWithManager
@@ -222,6 +223,24 @@ fun ProjectDetailScreen(
         val urls = (uploadMap["custom_media_urls"] as? List<*>)?.mapNotNull { it?.toString() }.orEmpty()
         mutableStateOf(urls.joinToString("\n"))
     }
+    var editEditingPace by remember(project?.id, uploadMap["editing_pace"]) {
+        mutableStateOf(uploadMap["editing_pace"]?.toString()?.ifBlank { "viral_fast" } ?: "viral_fast")
+    }
+    var editBgmMood by remember(project?.id, uploadMap["bgm_mood"]) {
+        mutableStateOf(uploadMap["bgm_mood"]?.toString()?.ifBlank { "auto" } ?: "auto")
+    }
+    var editSfxEnabled by remember(project?.id, uploadMap["sfx_enabled"]) {
+        mutableStateOf(uploadMap["sfx_enabled"] as? Boolean ?: true)
+    }
+    var editColorGrade by remember(project?.id, uploadMap["color_grade"]) {
+        mutableStateOf(uploadMap["color_grade"]?.toString()?.ifBlank { "vibrant" } ?: "vibrant")
+    }
+    var editWhisperSync by remember(project?.id, uploadMap["whisper_sync"]) {
+        mutableStateOf(uploadMap["whisper_sync"] as? Boolean ?: true)
+    }
+    var editHookBannerEnabled by remember(project?.id, uploadMap["hook_banner"]) {
+        mutableStateOf(uploadMap["hook_banner"] as? Boolean ?: true)
+    }
     var regenerateVoiceOnRerender by remember { mutableStateOf(true) }
     var refetchMediaOnRerender by remember { mutableStateOf(false) }
     var expandCreativeStudio by remember(project?.id, project?.status) {
@@ -302,7 +321,13 @@ fun ProjectDetailScreen(
             subtitlesEnabled = editSubtitlesEnabled,
             mediaSourceMode = editMediaSourceMode,
             customMediaUrls = parseCustomMediaLinks(editCustomLinksText),
-            sceneOverrides = sceneOverrides
+            sceneOverrides = sceneOverrides,
+            editingPace = editEditingPace,
+            bgmMood = editBgmMood,
+            sfxEnabled = editSfxEnabled,
+            colorGrade = editColorGrade,
+            whisperSync = editWhisperSync,
+            hookBannerEnabled = editHookBannerEnabled
         )
     }
 
@@ -767,6 +792,23 @@ fun ProjectDetailScreen(
                                     editCustomLinksText = it
                                     if (it.isNotBlank()) refetchMediaOnRerender = true
                                 }
+                            )
+
+                            HorizontalDivider()
+
+                            ViralProductionControlsSection(
+                                editingPace = editEditingPace,
+                                bgmMood = editBgmMood,
+                                sfxEnabled = editSfxEnabled,
+                                colorGrade = editColorGrade,
+                                whisperSync = editWhisperSync,
+                                hookBannerEnabled = editHookBannerEnabled,
+                                onEditingPaceChange = { editEditingPace = it },
+                                onBgmMoodChange = { editBgmMood = it },
+                                onSfxEnabledChange = { editSfxEnabled = it },
+                                onColorGradeChange = { editColorGrade = it },
+                                onWhisperSyncChange = { editWhisperSync = it },
+                                onHookBannerEnabledChange = { editHookBannerEnabled = it }
                             )
 
                             HorizontalDivider()

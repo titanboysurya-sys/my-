@@ -9,7 +9,12 @@ import {
   sensitiveRateLimiter,
   type AuthenticatedRequest,
 } from '../middleware/auth.js';
-import { normalizeSubtitlePreset } from '../services/ffmpegRenderer.js';
+import {
+  normalizeColorGrade,
+  normalizeEditingPace,
+  normalizeSubtitlePreset,
+} from '../services/ffmpegRenderer.js';
+import { sanitizeSpokenNarration } from '../services/narrationSanitizer.js';
 import { assertSafeExternalUrl } from '../security/urlGuard.js';
 import {
   createAIProviderForUser,
@@ -552,6 +557,15 @@ apiRouter.post('/projects', sensitiveRateLimiter, async (req: AuthenticatedReque
       youtubeAccountId: z.string().uuid().nullable().optional(),
       mediaSourceMode: z.enum(['all', 'open_source_only', 'api_only']).default('all'),
       customMediaUrls: z.array(z.string().max(1024)).max(15).optional(),
+      editingPace: z.enum(['viral_fast', 'balanced', 'cinematic']).optional(),
+      bgmMood: z
+        .enum(['auto', 'none', 'cinematic', 'mystery', 'motivational', 'tech', 'dark_phonk'])
+        .default('auto'),
+      sfxEnabled: z.boolean().default(true),
+      colorGrade: z.enum(['vibrant', 'dark_moody', 'teal_orange', 'clean']).default('vibrant'),
+      whisperSync: z.boolean().default(true),
+      hookStyle: z.enum(['viral_retention', 'story_arc', 'standard']).default('viral_retention'),
+      hookBannerEnabled: z.boolean().default(true),
       startImmediately: z.boolean().default(true),
     });
     const body = schema.parse(req.body);
@@ -565,6 +579,9 @@ apiRouter.post('/projects', sensitiveRateLimiter, async (req: AuthenticatedReque
       .map((u) => assertSafeExternalUrl(u, 'user_media').toString());
 
     const supabase = getSupabaseAdmin();
+    const resolvedPace = normalizeEditingPace(
+      body.editingPace || (body.format === '9:16' ? 'viral_fast' : 'balanced')
+    );
 
     const { data: project, error } = await supabase
       .from('projects')
@@ -602,6 +619,13 @@ apiRouter.post('/projects', sensitiveRateLimiter, async (req: AuthenticatedReque
           youtube_account_id: body.youtubeAccountId || null,
           media_source_mode: body.mediaSourceMode,
           custom_media_urls: validatedCustomUrls,
+          editing_pace: resolvedPace,
+          bgm_mood: body.bgmMood,
+          sfx_enabled: body.sfxEnabled,
+          color_grade: normalizeColorGrade(body.colorGrade),
+          whisper_sync: body.whisperSync,
+          hook_style: body.hookStyle,
+          hook_banner: body.hookBannerEnabled,
         },
         status: 'queued',
       })
@@ -759,7 +783,8 @@ apiRouter.put('/projects/:id/script', async (req: AuthenticatedRequest, res: Res
       .limit(1)
       .maybeSingle();
 
-    const words = body.narrationText.trim().split(/\s+/).filter(Boolean).length;
+    const cleanSpoken = sanitizeSpokenNarration(body.narrationText) || body.narrationText.trim();
+    const words = cleanSpoken.split(/\s+/).filter(Boolean).length;
     const { data: script, error } = await supabase
       .from('scripts')
       .insert({
@@ -767,7 +792,7 @@ apiRouter.put('/projects/:id/script', async (req: AuthenticatedRequest, res: Res
         project_id: projectId,
         version: (latest?.version || 0) + 1,
         title_idea: body.titleIdea || '',
-        narration_text: body.narrationText.trim(),
+        narration_text: cleanSpoken,
         script_text: body.narrationText.trim(),
         word_count: words,
         approved: body.approveAndContinue,
@@ -890,6 +915,14 @@ apiRouter.put('/projects/:id/settings', async (req: AuthenticatedRequest, res: R
         subtitlesEnabled: z.boolean().optional(),
         mediaSourceMode: z.enum(['all', 'open_source_only', 'api_only']).optional(),
         customMediaUrls: z.array(z.string().max(1024)).max(15).optional(),
+        editingPace: z.enum(['viral_fast', 'balanced', 'cinematic']).optional(),
+        bgmMood: z
+          .enum(['auto', 'none', 'cinematic', 'mystery', 'motivational', 'tech', 'dark_phonk'])
+          .optional(),
+        sfxEnabled: z.boolean().optional(),
+        colorGrade: z.enum(['vibrant', 'dark_moody', 'teal_orange', 'clean']).optional(),
+        whisperSync: z.boolean().optional(),
+        hookBannerEnabled: z.boolean().optional(),
         sceneOverrides: z
           .array(
             z.object({
@@ -942,7 +975,16 @@ apiRouter.put('/projects/:id/settings', async (req: AuthenticatedRequest, res: R
       };
     }
 
-    if (body.mediaSourceMode !== undefined || body.customMediaUrls !== undefined) {
+    if (
+      body.mediaSourceMode !== undefined ||
+      body.customMediaUrls !== undefined ||
+      body.editingPace !== undefined ||
+      body.bgmMood !== undefined ||
+      body.sfxEnabled !== undefined ||
+      body.colorGrade !== undefined ||
+      body.whisperSync !== undefined ||
+      body.hookBannerEnabled !== undefined
+    ) {
       const safeUrls =
         body.customMediaUrls !== undefined
           ? body.customMediaUrls
@@ -954,6 +996,12 @@ apiRouter.put('/projects/:id/settings', async (req: AuthenticatedRequest, res: R
         ...existingUpload,
         media_source_mode: body.mediaSourceMode ?? existingUpload.media_source_mode ?? 'all',
         custom_media_urls: safeUrls,
+        editing_pace: body.editingPace ?? existingUpload.editing_pace ?? 'viral_fast',
+        bgm_mood: body.bgmMood ?? existingUpload.bgm_mood ?? 'auto',
+        sfx_enabled: body.sfxEnabled ?? existingUpload.sfx_enabled ?? true,
+        color_grade: body.colorGrade ?? existingUpload.color_grade ?? 'vibrant',
+        whisper_sync: body.whisperSync ?? existingUpload.whisper_sync ?? true,
+        hook_banner: body.hookBannerEnabled ?? existingUpload.hook_banner ?? true,
       };
     }
 

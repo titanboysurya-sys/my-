@@ -6,6 +6,7 @@ import {
   GROQ_BASE_URL,
   resolveUserProviderKey,
 } from './credentialService.js';
+import { sanitizeSpokenNarration } from './narrationSanitizer.js';
 import {
   isModelRetiredOrUnsupportedError,
   markGeminiTextModelRetired,
@@ -720,15 +721,34 @@ export async function generateScriptWithAI(
     contentStyle: string;
     durationSeconds: number;
     tone?: string;
+    hookStyle?: 'viral_retention' | 'story_arc' | 'standard';
     references?: ResearchReference[];
   }
 ): Promise<GeneratedScript> {
   const words = targetWordRangeForDuration(params.durationSeconds);
   const lang = resolveLanguageMeta(params.language);
+  const hookStyle = params.hookStyle || 'viral_retention';
+  const isShortForm = params.durationSeconds <= 95;
 
-  const systemPrompt = `You are an elite YouTube scriptwriter.
+  const retentionRules =
+    hookStyle === 'viral_retention'
+      ? `VIRAL RETENTION FORMULA:
+- 0-2s PATTERN-INTERRUPT HOOK: Start sentence #1 with a shocking counter-intuitive truth, bold claim, or urgent curiosity gap (ZERO slow intros or greetings).
+- EVERY 7-9s RE-HOOK TWIST: Inject micro curiosity twists ("Wait—here is the part nobody notices...", or equivalent natural idiom in ${lang.name}) so viewers do not swipe away.
+- SHORT PUNCHY SENTENCES: Keep average sentence length crisp (6-13 words) for breathless Shorts pacing.${
+          isShortForm
+            ? `\n- SEAMLESS LOOP ENDING: End the final sentence mid-thought or in a way that flows grammatically right back into the very first word of the hook so auto-replay feels seamless!`
+            : ''
+        }`
+      : hookStyle === 'story_arc'
+        ? `STORYTELLING ARC: Open in the middle of the action, escalate tension with vivid concrete details, deliver an unforgettable climax reveal, and close cleanly.`
+        : `Write clear, informative, tight spoken narration with zero fluff.`;
+
+  const systemPrompt = `You are an elite viral YouTube scriptwriter.
 CRITICAL LANGUAGE RULE: ${lang.scriptInstruction} Every single field (titleIdea, hook, narrationText, fullScript, ending, callToAction) MUST be written in ${lang.name}. NEVER default to English if the requested language is ${lang.name}.
-Write original, natural, punchy spoken narration with zero filler greetings ("Hey guys welcome back") and zero stage directions/brackets inside narrationText. Match the spoken word count strictly to the target duration (${words.min}-${words.max} spoken words). Do not fabricate facts. Return strictly valid JSON.`;
+CRITICAL AUDIO PURITY RULE: narrationText will be read ALOUD verbatim by a Text-to-Speech voice actor. NEVER include [Visual: ...], [Scene 1], (Camera zooms), *pause*, [SFX: ...], "Narrator:", timestamps, headings, or markdown inside narrationText or hook or ending — write ONLY the pure spoken words!
+${retentionRules}
+Match spoken word count strictly to ${words.min}-${words.max} words. Do not fabricate facts. Return strictly valid JSON.`;
 
   const userPrompt = JSON.stringify({
     topic: params.topic,
@@ -737,31 +757,34 @@ Write original, natural, punchy spoken narration with zero filler greetings ("He
     targetLanguageName: lang.name,
     languageRequirement: lang.scriptInstruction,
     contentStyle: params.contentStyle,
-    tone: params.tone || 'engaging',
+    hookStyle,
+    tone: params.tone || 'high-energy engaging',
     durationSeconds: params.durationSeconds,
     targetWordRange: words,
     verifiedReferences: params.references || [],
     requiredJsonSchema: {
       titleIdea: `string (in ${lang.name})`,
-      hook: `string (first 3 seconds spoken hook in ${lang.name})`,
-      narrationText: `string (complete continuous spoken narration in ${lang.name} from hook to ending, ready for TTS, no stage brackets or markdown)`,
-      fullScript: `string (formatted script in ${lang.name})`,
-      ending: `string (in ${lang.name})`,
-      callToAction: `string (in ${lang.name})`,
+      hook: `string (first 2 seconds ultra-punchy spoken hook ONLY, no brackets/labels, in ${lang.name})`,
+      narrationText: `string (100% pure spoken narration in ${lang.name} from hook to ending; ZERO brackets [], ZERO parentheses (), ZERO stage/camera cues, ZERO speaker labels)`,
+      fullScript: `string (readable script in ${lang.name})`,
+      ending: `string (spoken closing line in ${lang.name})`,
+      callToAction: `string (brief 4-7 word spoken CTA in ${lang.name})`,
     },
   });
 
   const raw = await ai.generateJson<Omit<GeneratedScript, 'wordCount'>>(systemPrompt, userPrompt);
-  const narration = (raw.narrationText || raw.fullScript || '').trim();
+  const cleanHook = sanitizeSpokenNarration(raw.hook || '');
+  const cleanEnding = sanitizeSpokenNarration(raw.ending || '');
+  const narration = sanitizeSpokenNarration(raw.narrationText || raw.fullScript || '');
   const wordCount = narration.split(/\s+/).filter(Boolean).length;
 
   return {
-    titleIdea: raw.titleIdea || params.topic,
-    hook: raw.hook || '',
+    titleIdea: (raw.titleIdea || params.topic).trim(),
+    hook: cleanHook,
     narrationText: narration,
     fullScript: raw.fullScript || narration,
-    ending: raw.ending || '',
-    callToAction: raw.callToAction || '',
+    ending: cleanEnding,
+    callToAction: sanitizeSpokenNarration(raw.callToAction || ''),
     wordCount,
   };
 }
@@ -775,18 +798,28 @@ export async function generateSceneBreakdownWithAI(
     language: string;
     durationSeconds: number;
     format: '9:16' | '16:9' | '1:1';
+    editingPace?: 'viral_fast' | 'balanced' | 'cinematic';
   }
 ): Promise<GeneratedScene[]> {
-  const recommendedScenes = Math.max(4, Math.min(18, Math.round(params.durationSeconds / 4.5)));
+  const pace = params.editingPace || (params.format === '9:16' ? 'viral_fast' : 'balanced');
+  const secPerScene = pace === 'viral_fast' ? 2.4 : pace === 'cinematic' ? 4.8 : 3.4;
+  const minScenes = pace === 'viral_fast' ? 6 : 4;
+  const maxScenes = pace === 'viral_fast' ? 26 : 20;
+  const recommendedScenes = Math.max(
+    minScenes,
+    Math.min(maxScenes, Math.round(params.durationSeconds / secPerScene))
+  );
   const lang = resolveLanguageMeta(params.language);
 
-  const systemPrompt = `You are a documentary video director breaking a spoken narration script into tightly synchronized visual scenes for stock footage assembly (Pexels / Pixabay).
+  const systemPrompt = `You are a viral YouTube Shorts & documentary video editor breaking a spoken narration script into tightly synchronized, fast-moving visual scenes for stock footage assembly (Pexels / Pixabay / Wikimedia / NASA).
 RULES:
-1. VERBATIM NARRATION COVERAGE: Split narrationText sequentially from start to finish so concatenating all scenes[].narration reproduces 100% of narrationText in exact order without skipping, summarizing, or translating a single sentence.
-2. SUBTITLE LANGUAGE: Both narration and subtitleText MUST stay strictly in ${lang.name} (matching narrationText verbatim).
+1. VERBATIM NARRATION COVERAGE: Split narrationText sequentially from start to finish into ~${recommendedScenes} snappy visual beats (~${secPerScene.toFixed(1)}s each) so concatenating all scenes[].narration reproduces 100% of narrationText in exact order without skipping, summarizing, or translating a single sentence.
+2. SPOKEN-ONLY SUBTITLES: Both scenes[].narration and scenes[].subtitleText MUST contain ONLY the exact spoken words from narrationText in ${lang.name} — NEVER include [Scene], [Visual], camera notes, or labels.
 3. FILMABLE ENGLISH VISUAL QUERIES: primaryKeyword and alternativeKeywords MUST be concise, concrete, literally filmable English stock-video queries (2-3 words) depicting the exact physical subject or action spoken in that scene (e.g. "smartphone screen hand", "server room glowing", "doctor examining xray", "rocket launch fire"). NEVER use abstract words like "facts", "secret", "future", "success", "concept", "motivation", or the full sentence.
-4. DYNAMIC FOOTAGE: Prefer "video" for mediaTypePreference on almost all scenes so clips have natural motion without frozen frames.
+4. DYNAMIC MOTION & TRANSITIONS: Prefer "video" for mediaTypePreference on almost all scenes, and use energetic transitions from ["punch", "flash", "cut", "slide", "zoom"] (especially "punch" or "flash" on high-impact moments!).
 Return strictly valid JSON.`;
+
+  const cleanScript = sanitizeSpokenNarration(params.narrationText) || params.narrationText;
 
   const userPrompt = JSON.stringify({
     topic: params.topic,
@@ -794,21 +827,22 @@ Return strictly valid JSON.`;
     narrationLanguageCode: lang.code,
     narrationLanguageName: lang.name,
     format: params.format,
+    editingPace: pace,
     targetTotalDurationSeconds: params.durationSeconds,
     recommendedSceneCount: recommendedScenes,
-    narrationText: params.narrationText,
+    narrationText: cleanScript,
     requiredJsonSchema: {
       scenes: [
         {
           sceneNumber: 1,
-          narration: `exact verbatim segment from narrationText in ${lang.name}`,
-          estimatedDuration: 4.5,
+          narration: `exact verbatim spoken segment from narrationText in ${lang.name}`,
+          estimatedDuration: secPerScene,
           visualDescription: 'concrete physical visual scene matching what is being said right now',
           primaryKeyword: 'concrete 2-3 word english stock footage query',
           alternativeKeywords: ['concrete english alt query 1', 'concrete english alt query 2'],
           mediaTypePreference: 'video',
-          transition: 'fade',
-          subtitleText: `exact verbatim subtitle text in ${lang.name} matching narration`,
+          transition: 'punch',
+          subtitleText: `exact verbatim spoken words in ${lang.name} matching narration`,
         },
       ],
     },
@@ -819,17 +853,21 @@ Return strictly valid JSON.`;
   if (scenes.length === 0) {
     throw new Error('Scene breakdown produced zero scenes.');
   }
-  return scenes.map((s, idx) => ({
-    sceneNumber: idx + 1,
-    narration: (s.narration || '').trim(),
-    estimatedDuration: Math.max(2, Number(s.estimatedDuration || 4.5)),
-    visualDescription: (s.visualDescription || params.topic).trim(),
-    primaryKeyword: (s.primaryKeyword || params.niche).trim(),
-    alternativeKeywords: Array.isArray(s.alternativeKeywords) ? s.alternativeKeywords : [],
-    mediaTypePreference: s.mediaTypePreference === 'image' ? 'image' : 'video',
-    transition: s.transition || 'fade',
-    subtitleText: (s.subtitleText || s.narration || '').trim(),
-  }));
+  return scenes.map((s, idx) => {
+    const cleanNar = sanitizeSpokenNarration(s.narration || '');
+    const cleanSub = sanitizeSpokenNarration(s.subtitleText || '') || cleanNar;
+    return {
+      sceneNumber: idx + 1,
+      narration: cleanNar,
+      estimatedDuration: Math.max(1.5, Number(s.estimatedDuration || secPerScene)),
+      visualDescription: (s.visualDescription || params.topic).trim(),
+      primaryKeyword: (s.primaryKeyword || params.niche).trim(),
+      alternativeKeywords: Array.isArray(s.alternativeKeywords) ? s.alternativeKeywords : [],
+      mediaTypePreference: s.mediaTypePreference === 'image' ? 'image' : 'video',
+      transition: s.transition || (idx === 0 ? 'punch' : 'cut'),
+      subtitleText: cleanSub,
+    };
+  });
 }
 
 export async function generateSeoMetadataWithAI(
@@ -845,9 +883,9 @@ export async function generateSeoMetadataWithAI(
 ): Promise<GeneratedSeoMetadata> {
   const lang = resolveLanguageMeta(params.language);
 
-  const systemPrompt = `You are a YouTube SEO specialist.
+  const systemPrompt = `You are a YouTube CTR & SEO growth strategist.
 CRITICAL LANGUAGE RULE: ${lang.scriptInstruction} Write title, description, tags, and thumbnailHeadline strictly in ${lang.name} to match the video's spoken language.
-Generate accurate, non-misleading metadata matching the actual video narration. Include 3-5 concise hashtags and a crisp 2-4 word thumbnail headline with high readability. Return strictly valid JSON.`;
+Generate high-CTR, accurate, curiosity-driven metadata matching the actual video narration. Include 3-5 concise hashtags and a punchy 2-4 word high-contrast thumbnailHeadline (curiosity/shock trigger). Return strictly valid JSON.`;
 
   const userPrompt = JSON.stringify({
     topic: params.topic,

@@ -6,7 +6,7 @@ import { config, sanitizeErrorMessage } from '../config/env.js';
 import { uploadToStorageWithAutoBucket } from '../db/supabase.js';
 import { resolveConfinedPath } from '../security/urlGuard.js';
 import { resolveUserProviderKey } from './credentialService.js';
-import { sanitizeSpokenNarration } from './narrationSanitizer.js';
+import { parseDelimitedScriptSections, sanitizeSpokenNarration } from './narrationSanitizer.js';
 import {
   isModelRetiredOrUnsupportedError,
   markGeminiTtsModelRetired,
@@ -497,9 +497,10 @@ export interface VoiceSynthesisResult {
 export async function synthesizeNarration(
   req: VoiceSynthesisRequest
 ): Promise<VoiceSynthesisResult> {
-  const cleanText = sanitizeSpokenNarration(req.text);
+  const parsed = parseDelimitedScriptSections(req.text);
+  const cleanText = parsed.voiceoverScript || sanitizeSpokenNarration(req.text);
   if (!cleanText) {
-    throw new Error('Spoken narration script is empty after removing non-spoken stage cues.');
+    throw new Error('Spoken narration script is empty after removing non-spoken visual instructions.');
   }
   const cleanReq: VoiceSynthesisRequest = { ...req, text: cleanText };
 
@@ -631,9 +632,11 @@ async function generateWithGeminiTts(
   const voiceName = profile.geminiVoiceName;
   const speedClamped = Math.max(0.75, Math.min(1.4, Number(req.speed || 1.0)));
 
-  // Send ONLY the clean spoken text to Gemini TTS — never wrap with natural-language prompt
-  // instructions ("Read the following aloud..."), because TTS models speak prompt wrappers out loud!
-  const pureSpokenText = sanitizeSpokenNarration(req.text) || req.text.trim();
+  // Send ONLY the clean spoken Voiceover Script to Gemini TTS — never send visual instructions or
+  // natural-language prompt wrappers ("Read the following aloud..."), which TTS speaks out loud!
+  const parsedVoiceover = parseDelimitedScriptSections(req.text);
+  const pureSpokenText =
+    parsedVoiceover.voiceoverScript || sanitizeSpokenNarration(req.text) || req.text.trim();
   const requestBody = JSON.stringify({
     contents: [
       {

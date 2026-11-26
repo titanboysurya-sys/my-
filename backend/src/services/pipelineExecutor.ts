@@ -27,7 +27,7 @@ import {
   type SubtitleStyleConfig,
   type TimelineSceneClip,
 } from './ffmpegRenderer.js';
-import { sanitizeSpokenNarration } from './narrationSanitizer.js';
+import { parseDelimitedScriptSections, sanitizeSpokenNarration } from './narrationSanitizer.js';
 import {
   autoBgmMoodForNiche,
   generateProceduralBgmTrack,
@@ -451,8 +451,17 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
 
     if (!shouldSkipStage(completedStages, 'generating_scenes') || !scenes || scenes.length === 0) {
       await updateJobStage(job.id, project.id, 'generating_scenes', 28, 'Breaking script into fast-paced visual scenes', completedStages);
+      const parsedFromSavedScript = parseDelimitedScriptSections(
+        latestScript.script_text || latestScript.narration_text || ''
+      );
+      const pureVoiceoverForScenes =
+        parseDelimitedScriptSections(latestScript.narration_text || '').voiceoverScript ||
+        parsedFromSavedScript.voiceoverScript ||
+        latestScript.narration_text ||
+        latestScript.script_text;
       const breakdown = await generateSceneBreakdownWithAI(ai, {
-        narrationText: latestScript.narration_text || latestScript.script_text,
+        narrationText: pureVoiceoverForScenes,
+        visualInstructions: parsedFromSavedScript.videoVisualInstructions || undefined,
         topic: resolvedTopic,
         niche: project.niche,
         language: project.language,
@@ -676,10 +685,12 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
 
     if (!localNarrationPath) {
       await updateJobStage(job.id, project.id, 'generating_voice', 62, 'Synthesizing clean voice-over (spoken text only)', completedStages);
+      const parsedNarration = parseDelimitedScriptSections(
+        latestScript.narration_text || latestScript.script_text || ''
+      );
       const cleanNarrationText =
-        sanitizeSpokenNarration(latestScript.narration_text || latestScript.script_text) ||
-        latestScript.narration_text ||
-        latestScript.script_text;
+        parsedNarration.voiceoverScript ||
+        sanitizeSpokenNarration(latestScript.narration_text || latestScript.script_text);
       const voiceResult = await synthesizeNarration({
         userId: job.user_id,
         projectId: project.id,

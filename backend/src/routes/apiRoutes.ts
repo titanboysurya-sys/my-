@@ -14,7 +14,7 @@ import {
   normalizeEditingPace,
   normalizeSubtitlePreset,
 } from '../services/ffmpegRenderer.js';
-import { sanitizeSpokenNarration } from '../services/narrationSanitizer.js';
+import { parseDelimitedScriptSections, sanitizeSpokenNarration } from '../services/narrationSanitizer.js';
 import { assertSafeExternalUrl } from '../security/urlGuard.js';
 import {
   createAIProviderForUser,
@@ -783,7 +783,9 @@ apiRouter.put('/projects/:id/script', async (req: AuthenticatedRequest, res: Res
       .limit(1)
       .maybeSingle();
 
-    const cleanSpoken = sanitizeSpokenNarration(body.narrationText) || body.narrationText.trim();
+    const parsedEdit = parseDelimitedScriptSections(body.narrationText);
+    const cleanSpoken =
+      parsedEdit.voiceoverScript || sanitizeSpokenNarration(body.narrationText) || body.narrationText.trim();
     const words = cleanSpoken.split(/\s+/).filter(Boolean).length;
     const { data: script, error } = await supabase
       .from('scripts')

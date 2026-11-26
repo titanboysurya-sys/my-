@@ -6,7 +6,15 @@ import {
   GROQ_BASE_URL,
   resolveUserProviderKey,
 } from './credentialService.js';
-import { sanitizeSpokenNarration } from './narrationSanitizer.js';
+import {
+  VIDEO_VISUAL_INSTRUCTIONS_END,
+  VIDEO_VISUAL_INSTRUCTIONS_START,
+  VOICEOVER_SCRIPT_END,
+  VOICEOVER_SCRIPT_START,
+  formatDelimitedScriptDocument,
+  parseDelimitedScriptSections,
+  sanitizeSpokenNarration,
+} from './narrationSanitizer.js';
 import {
   isModelRetiredOrUnsupportedError,
   markGeminiTextModelRetired,
@@ -48,6 +56,7 @@ export interface GeneratedScript {
   hook: string;
   narrationText: string;
   fullScript: string;
+  visualInstructions?: string;
   ending: string;
   callToAction: string;
   wordCount: number;
@@ -744,11 +753,19 @@ export async function generateScriptWithAI(
         ? `STORYTELLING ARC: Open in the middle of the action, escalate tension with vivid concrete details, deliver an unforgettable climax reveal, and close cleanly.`
         : `Write clear, informative, tight spoken narration with zero fluff.`;
 
-  const systemPrompt = `You are an elite viral YouTube scriptwriter.
-CRITICAL LANGUAGE RULE: ${lang.scriptInstruction} Every single field (titleIdea, hook, narrationText, fullScript, ending, callToAction) MUST be written in ${lang.name}. NEVER default to English if the requested language is ${lang.name}.
-CRITICAL AUDIO PURITY RULE: narrationText will be read ALOUD verbatim by a Text-to-Speech voice actor. NEVER include [Visual: ...], [Scene 1], (Camera zooms), *pause*, [SFX: ...], "Narrator:", timestamps, headings, or markdown inside narrationText or hook or ending — write ONLY the pure spoken words!
+  const systemPrompt = `You are an elite viral YouTube scriptwriter and visual director.
+CRITICAL LANGUAGE RULE: ${lang.scriptInstruction} All spoken fields (titleIdea, hook, voiceoverScript, narrationText, ending, callToAction) MUST be written in ${lang.name}. NEVER default to English if the requested language is ${lang.name}.
+
+STRICT TWO-SECTION SEPARATION RULE (MANDATORY):
+You MUST explicitly separate "Video Visual Instructions" from "Voiceover Script" using the exact delimiters below so our automated pipeline can parse them independently and NEVER send visual instructions to the Text-to-Speech audio engine:
+1. Video Visual Instructions Section (${VIDEO_VISUAL_INSTRUCTIONS_START} ... ${VIDEO_VISUAL_INSTRUCTIONS_END}):
+   - Contains ALL shot lists, B-roll footage ideas, camera moves (zoom/pan/cuts), SFX/music cues, timestamps, and on-screen text graphics.
+   - This section is NEVER spoken aloud.
+2. Voiceover Script Section (${VOICEOVER_SCRIPT_START} ... ${VOICEOVER_SCRIPT_END}):
+   - Contains ONLY the pure spoken words that the voice actor will read verbatim into the microphone in ${lang.name}.
+   - ZERO visual cues, ZERO camera directions, ZERO [brackets], ZERO (parenthetical stage directions), ZERO *actions*, ZERO SFX tags, ZERO timestamps, and ZERO speaker labels like "Narrator:".
 ${retentionRules}
-Match spoken word count strictly to ${words.min}-${words.max} words. Do not fabricate facts. Return strictly valid JSON.`;
+Match Voiceover Script spoken word count strictly to ${words.min}-${words.max} words. Do not fabricate facts. Return strictly valid JSON.`;
 
   const userPrompt = JSON.stringify({
     topic: params.topic,
@@ -762,27 +779,66 @@ Match spoken word count strictly to ${words.min}-${words.max} words. Do not fabr
     durationSeconds: params.durationSeconds,
     targetWordRange: words,
     verifiedReferences: params.references || [],
+    sectionDelimiters: {
+      videoVisualInstructionsStart: VIDEO_VISUAL_INSTRUCTIONS_START,
+      videoVisualInstructionsEnd: VIDEO_VISUAL_INSTRUCTIONS_END,
+      voiceoverScriptStart: VOICEOVER_SCRIPT_START,
+      voiceoverScriptEnd: VOICEOVER_SCRIPT_END,
+    },
     requiredJsonSchema: {
       titleIdea: `string (in ${lang.name})`,
-      hook: `string (first 2 seconds ultra-punchy spoken hook ONLY, no brackets/labels, in ${lang.name})`,
-      narrationText: `string (100% pure spoken narration in ${lang.name} from hook to ending; ZERO brackets [], ZERO parentheses (), ZERO stage/camera cues, ZERO speaker labels)`,
-      fullScript: `string (readable script in ${lang.name})`,
-      ending: `string (spoken closing line in ${lang.name})`,
-      callToAction: `string (brief 4-7 word spoken CTA in ${lang.name})`,
+      hook: `string (first 2 seconds ultra-punchy spoken hook ONLY, pure speech, no brackets/visual notes, in ${lang.name})`,
+      videoVisualInstructions: `string (MUST begin with "${VIDEO_VISUAL_INSTRUCTIONS_START}" and end with "${VIDEO_VISUAL_INSTRUCTIONS_END}"; put ALL scene-by-scene shot cues, camera movements, B-roll ideas, SFX, and overlays ONLY here)`,
+      voiceoverScript: `string (MUST begin with "${VOICEOVER_SCRIPT_START}" and end with "${VOICEOVER_SCRIPT_END}"; 100% pure spoken words ONLY in ${lang.name}; ZERO visual instructions, ZERO brackets [], ZERO parentheses (), ZERO labels)`,
+      narrationText: `string (exact same pure spoken words as inside voiceoverScript without delimiters, in ${lang.name})`,
+      fullScript: `string (production sheet containing BOTH "${VIDEO_VISUAL_INSTRUCTIONS_START}\\n...\\n${VIDEO_VISUAL_INSTRUCTIONS_END}\\n\\n${VOICEOVER_SCRIPT_START}\\n...\\n${VOICEOVER_SCRIPT_END}")`,
+      ending: `string (pure spoken closing line in ${lang.name})`,
+      callToAction: `string (brief 4-7 word pure spoken CTA in ${lang.name})`,
     },
   });
 
-  const raw = await ai.generateJson<Omit<GeneratedScript, 'wordCount'>>(systemPrompt, userPrompt);
+  const raw = await ai.generateJson<
+    Omit<GeneratedScript, 'wordCount'> & {
+      voiceoverScript?: string;
+      videoVisualInstructions?: string;
+    }
+  >(systemPrompt, userPrompt);
+
+  // Independently parse each section using explicit delimiters so visual instructions never leak into TTS audio
+  const parsedFromFull = parseDelimitedScriptSections(raw.fullScript || '');
+  const parsedFromVoiceover = parseDelimitedScriptSections(raw.voiceoverScript || '');
+  const parsedFromNarration = parseDelimitedScriptSections(raw.narrationText || '');
+  const parsedFromVisualField = parseDelimitedScriptSections(
+    raw.videoVisualInstructions
+      ? `${VIDEO_VISUAL_INSTRUCTIONS_START}\n${raw.videoVisualInstructions}\n${VIDEO_VISUAL_INSTRUCTIONS_END}`
+      : ''
+  );
+
+  const visualInstructions =
+    parsedFromVisualField.videoVisualInstructions ||
+    parsedFromFull.videoVisualInstructions ||
+    parsedFromVoiceover.videoVisualInstructions ||
+    parsedFromNarration.videoVisualInstructions ||
+    '';
+
+  const narration =
+    (parsedFromVoiceover.hasExplicitDelimiters && parsedFromVoiceover.voiceoverScript) ||
+    (parsedFromFull.hasExplicitDelimiters && parsedFromFull.voiceoverScript) ||
+    parsedFromVoiceover.voiceoverScript ||
+    parsedFromNarration.voiceoverScript ||
+    parsedFromFull.voiceoverScript ||
+    '';
+
   const cleanHook = sanitizeSpokenNarration(raw.hook || '');
   const cleanEnding = sanitizeSpokenNarration(raw.ending || '');
-  const narration = sanitizeSpokenNarration(raw.narrationText || raw.fullScript || '');
   const wordCount = narration.split(/\s+/).filter(Boolean).length;
 
   return {
     titleIdea: (raw.titleIdea || params.topic).trim(),
     hook: cleanHook,
     narrationText: narration,
-    fullScript: raw.fullScript || narration,
+    fullScript: formatDelimitedScriptDocument(narration, visualInstructions),
+    visualInstructions,
     ending: cleanEnding,
     callToAction: sanitizeSpokenNarration(raw.callToAction || ''),
     wordCount,
@@ -793,6 +849,7 @@ export async function generateSceneBreakdownWithAI(
   ai: AIProviderClient,
   params: {
     narrationText: string;
+    visualInstructions?: string;
     topic: string;
     niche: string;
     language: string;
@@ -811,15 +868,19 @@ export async function generateSceneBreakdownWithAI(
   );
   const lang = resolveLanguageMeta(params.language);
 
-  const systemPrompt = `You are a viral YouTube Shorts & documentary video editor breaking a spoken narration script into tightly synchronized, fast-moving visual scenes for stock footage assembly (Pexels / Pixabay / Wikimedia / NASA).
+  const systemPrompt = `You are a viral YouTube Shorts & documentary video editor breaking a pure Voiceover Script into tightly synchronized, fast-moving visual scenes for stock footage assembly (Pexels / Pixabay / Wikimedia / NASA).
 RULES:
-1. VERBATIM NARRATION COVERAGE: Split narrationText sequentially from start to finish into ~${recommendedScenes} snappy visual beats (~${secPerScene.toFixed(1)}s each) so concatenating all scenes[].narration reproduces 100% of narrationText in exact order without skipping, summarizing, or translating a single sentence.
-2. SPOKEN-ONLY SUBTITLES: Both scenes[].narration and scenes[].subtitleText MUST contain ONLY the exact spoken words from narrationText in ${lang.name} — NEVER include [Scene], [Visual], camera notes, or labels.
-3. FILMABLE ENGLISH VISUAL QUERIES: primaryKeyword and alternativeKeywords MUST be concise, concrete, literally filmable English stock-video queries (2-3 words) depicting the exact physical subject or action spoken in that scene (e.g. "smartphone screen hand", "server room glowing", "doctor examining xray", "rocket launch fire"). NEVER use abstract words like "facts", "secret", "future", "success", "concept", "motivation", or the full sentence.
+1. VERBATIM NARRATION COVERAGE: Split voiceoverScript sequentially from start to finish into ~${recommendedScenes} snappy visual beats (~${secPerScene.toFixed(1)}s each) so concatenating all scenes[].narration reproduces 100% of voiceoverScript in exact order without skipping, summarizing, or translating a single sentence.
+2. SPOKEN-ONLY SUBTITLES: Both scenes[].narration and scenes[].subtitleText MUST contain ONLY the exact spoken words from voiceoverScript in ${lang.name} — NEVER copy anything from videoVisualInstructionsContext, [Scene], [Visual], camera notes, or labels into narration or subtitleText.
+3. FILMABLE ENGLISH VISUAL QUERIES: Use videoVisualInstructionsContext (if provided) plus what is being spoken to craft concise, concrete, literally filmable English stock-video queries (2-3 words) for primaryKeyword and alternativeKeywords (e.g. "smartphone screen hand", "server room glowing", "doctor examining xray", "rocket launch fire"). NEVER use abstract words like "facts", "secret", "future", "success", "concept", "motivation", or the full sentence.
 4. DYNAMIC MOTION & TRANSITIONS: Prefer "video" for mediaTypePreference on almost all scenes, and use energetic transitions from ["punch", "flash", "cut", "slide", "zoom"] (especially "punch" or "flash" on high-impact moments!).
 Return strictly valid JSON.`;
 
-  const cleanScript = sanitizeSpokenNarration(params.narrationText) || params.narrationText;
+  const parsedVoiceover = parseDelimitedScriptSections(params.narrationText);
+  const cleanScript =
+    parsedVoiceover.voiceoverScript || sanitizeSpokenNarration(params.narrationText) || params.narrationText;
+  const visualContext =
+    (params.visualInstructions || '').trim() || parsedVoiceover.videoVisualInstructions;
 
   const userPrompt = JSON.stringify({
     topic: params.topic,
@@ -830,12 +891,13 @@ Return strictly valid JSON.`;
     editingPace: pace,
     targetTotalDurationSeconds: params.durationSeconds,
     recommendedSceneCount: recommendedScenes,
-    narrationText: cleanScript,
+    voiceoverScript: cleanScript,
+    videoVisualInstructionsContext: visualContext || undefined,
     requiredJsonSchema: {
       scenes: [
         {
           sceneNumber: 1,
-          narration: `exact verbatim spoken segment from narrationText in ${lang.name}`,
+          narration: `exact verbatim spoken segment from voiceoverScript in ${lang.name} (NEVER visual cues)`,
           estimatedDuration: secPerScene,
           visualDescription: 'concrete physical visual scene matching what is being said right now',
           primaryKeyword: 'concrete 2-3 word english stock footage query',

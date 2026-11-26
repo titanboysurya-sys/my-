@@ -12,6 +12,7 @@ import { assertSafeExternalUrl, resolveConfinedPath } from '../src/security/urlG
 import { sanitizeErrorMessage } from '../src/config/env.js';
 import {
   FallbackAIProvider,
+  generateScriptWithAI,
   resolveLanguageMeta,
   targetWordRangeForDuration,
   type AIProviderClient,
@@ -39,7 +40,15 @@ import {
   normalizeSubtitlePreset,
   resolveOutputDimensions,
 } from '../src/services/ffmpegRenderer.js';
-import { sanitizeSpokenNarration } from '../src/services/narrationSanitizer.js';
+import {
+  VIDEO_VISUAL_INSTRUCTIONS_END,
+  VIDEO_VISUAL_INSTRUCTIONS_START,
+  VOICEOVER_SCRIPT_END,
+  VOICEOVER_SCRIPT_START,
+  formatDelimitedScriptDocument,
+  parseDelimitedScriptSections,
+  sanitizeSpokenNarration,
+} from '../src/services/narrationSanitizer.js';
 import { autoBgmMoodForNiche, normalizeBgmMood } from '../src/services/soundDesignService.js';
 import { mapScriptWordsToWhisperTimings } from '../src/services/whisperAlignService.js';
 import {
@@ -566,7 +575,84 @@ test('Phase 1 viral editing presets, BGM moods, Whisper word timing, and HookBan
   assert.ok(!ass.includes('[Visual'));
 });
 
+test('Delimited script parser separates Video Visual Instructions from Voiceover Script independently', () => {
+  const delimitedDoc = [
+    VIDEO_VISUAL_INSTRUCTIONS_START,
+    'Scene 1 (0:00-0:03): Fast drone push-in over Roman Colosseum, SFX sub boom.',
+    'Scene 2 (0:03-0:06): Close-up microscopic volcanic ash mixing with seawater.',
+    VIDEO_VISUAL_INSTRUCTIONS_END,
+    '',
+    VOICEOVER_SCRIPT_START,
+    'क्या आप जानते हैं कि रोमन कंक्रीट दो हजार साल बाद भी खुद को ठीक कर लेता है?',
+    'वैज्ञानिकों ने पाया कि इसमें मौजूद चूने के कण पानी के संपर्क में आते ही दरारें भर देते हैं।',
+    VOICEOVER_SCRIPT_END,
+  ].join('\n');
 
+  const parsed = parseDelimitedScriptSections(delimitedDoc);
+  assert.equal(parsed.hasExplicitDelimiters, true);
+  assert.ok(parsed.videoVisualInstructions.includes('Fast drone push-in'));
+  assert.ok(parsed.videoVisualInstructions.includes('microscopic volcanic ash'));
+  assert.ok(!parsed.voiceoverScript.includes('Colosseum'));
+  assert.ok(!parsed.voiceoverScript.includes('drone'));
+  assert.ok(!parsed.voiceoverScript.includes('SFX'));
+  assert.ok(!parsed.voiceoverScript.includes(VOICEOVER_SCRIPT_START));
+  assert.ok(parsed.voiceoverScript.includes('रोमन कंक्रीट'));
+  assert.ok(parsed.voiceoverScript.includes('दरारें भर देते हैं'));
 
+  // sanitizeSpokenNarration also strips delimited visual blocks automatically
+  const sanitized = sanitizeSpokenNarration(delimitedDoc);
+  assert.equal(sanitized, parsed.voiceoverScript);
 
+  const formatted = formatDelimitedScriptDocument(parsed.voiceoverScript, parsed.videoVisualInstructions);
+  assert.ok(formatted.includes(VIDEO_VISUAL_INSTRUCTIONS_START));
+  assert.ok(formatted.includes(VOICEOVER_SCRIPT_START));
+});
 
+test('generateScriptWithAI prompt enforces explicit delimiters and parses sections independently', async () => {
+  let capturedSystemPrompt = '';
+  let capturedUserPrompt = '';
+
+  const mockAi: AIProviderClient = {
+    name: 'mock-gemini',
+    async generateJson<T>(systemPrompt: string, userPrompt: string): Promise<T> {
+      capturedSystemPrompt = systemPrompt;
+      capturedUserPrompt = userPrompt;
+      return {
+        titleIdea: 'Roman Concrete Secret',
+        hook: '[Visual: zoom] Stop scrolling because ancient concrete still heals itself.',
+        videoVisualInstructions: `${VIDEO_VISUAL_INSTRUCTIONS_START}\n00:00-00:03: Drone shot of Roman harbor ruins\n00:03-00:06: Lab microscope cutaway\n${VIDEO_VISUAL_INSTRUCTIONS_END}`,
+        voiceoverScript: `${VOICEOVER_SCRIPT_START}\nStop scrolling because ancient Roman concrete still heals itself today. Scientists discovered hot-mixed lime clasts react with rainwater to seal cracks automatically.\n${VOICEOVER_SCRIPT_END}`,
+        narrationText: `${VIDEO_VISUAL_INSTRUCTIONS_START}\nDrone shot of ruins\n${VIDEO_VISUAL_INSTRUCTIONS_END}\nStop scrolling because ancient Roman concrete still heals itself today. Scientists discovered hot-mixed lime clasts react with rainwater to seal cracks automatically.`,
+        fullScript: 'placeholder',
+        ending: 'Which explains why their harbors survived two millennia.',
+        callToAction: 'Follow for more history.',
+      } as unknown as T;
+    },
+  };
+
+  const generated = await generateScriptWithAI(mockAi, {
+    topic: 'Roman self-healing concrete',
+    niche: 'History',
+    language: 'en',
+    contentStyle: 'documentary',
+    durationSeconds: 30,
+  });
+
+  // Prompt explicitly instructs Gemini with section names and delimiters
+  assert.ok(capturedSystemPrompt.includes(VIDEO_VISUAL_INSTRUCTIONS_START));
+  assert.ok(capturedSystemPrompt.includes(VIDEO_VISUAL_INSTRUCTIONS_END));
+  assert.ok(capturedSystemPrompt.includes(VOICEOVER_SCRIPT_START));
+  assert.ok(capturedSystemPrompt.includes(VOICEOVER_SCRIPT_END));
+  assert.ok(capturedUserPrompt.includes('Video Visual Instructions') || capturedSystemPrompt.includes('Video Visual Instructions'));
+  assert.ok(capturedSystemPrompt.includes('Voiceover Script'));
+
+  // Independent parsing ensures zero visual instructions leak into spoken narrationText or hook
+  assert.ok(generated.visualInstructions?.includes('Drone shot of Roman harbor ruins'));
+  assert.ok(!generated.narrationText.includes('Drone shot'));
+  assert.ok(!generated.narrationText.includes('Lab microscope'));
+  assert.ok(!generated.narrationText.includes(VOICEOVER_SCRIPT_START));
+  assert.ok(!generated.hook.includes('Visual'));
+  assert.ok(generated.narrationText.includes('Stop scrolling because ancient Roman concrete still heals itself today.'));
+  assert.ok(generated.fullScript.includes(VIDEO_VISUAL_INSTRUCTIONS_START));
+  assert.ok(generated.fullScript.includes(VOICEOVER_SCRIPT_START));
+});

@@ -150,4 +150,17 @@ class StudioCoreTest {
         assertEquals("proj-b", userBProjects.first().id)
         assertTrue(userBJobs.isEmpty())
     }
+
+    @Test
+    fun createProjectRequestPreservesCustomScriptMode() {
+        val req = com.example.core.network.CreateProjectRequest(
+            title = "Custom Story",
+            topic = "Custom Story",
+            scriptMode = "custom",
+            customScript = "Ek samay ek chalaak lomdi thi jo taare gin rahi thi.",
+            durationSeconds = 12
+        )
+        assertEquals("custom", req.scriptMode)
+        assertEquals("Ek samay ek chalaak lomdi thi jo taare gin rahi thi.", req.customScript)
+    }
 }

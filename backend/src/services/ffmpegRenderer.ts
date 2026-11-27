@@ -976,163 +976,170 @@ export async function renderVideoWithFfmpeg(
   await Promise.all(normalizedPaths.map((p) => fs.rm(p, { force: true }).catch(() => undefined)));
 
   // 4. Final pass: burn resolution-accurate ASS subtitles + mix narration + ducked BGM + transition SFX
-  const finalVideoPath = resolveConfinedPath(req.workDir, 'final_output.mp4');
-  const ffmpegArgs: string[] = [
-    '-y',
-    ...threadFlags,
-    '-i',
-    stitchedVideoPath,
-    '-i',
-    req.narrationAudioPath,
-  ];
-
-  let nextInputIdx = 2;
-  let musicInputIdx: number | null = null;
-  let boomInputIdx: number | null = null;
-  let whooshInputIdx: number | null = null;
-
-  const hasValidMusic = req.backgroundMusicPath
-    ? await probeHasAudioStream(req.backgroundMusicPath)
-    : false;
-  if (hasValidMusic && req.backgroundMusicPath) {
-    ffmpegArgs.push('-stream_loop', '-1', '-i', req.backgroundMusicPath);
-    musicInputIdx = nextInputIdx++;
-  }
-
+  // Pre-mix hook boom + transition whooshes into one clean stereo WAV so the main video pass stays simple & low-RAM
   const sfxActive = req.sfxEnabled !== false;
-  if (sfxActive && req.hookBoomPath && (await probeHasAudioStream(req.hookBoomPath))) {
-    ffmpegArgs.push('-i', req.hookBoomPath);
-    boomInputIdx = nextInputIdx++;
-  }
-  if (
+  const validBoomPath =
+    sfxActive && req.hookBoomPath && (await probeHasAudioStream(req.hookBoomPath))
+      ? req.hookBoomPath
+      : null;
+  const validWhooshPath =
     sfxActive &&
     req.whooshPath &&
     sceneCutOffsetsSec.length > 0 &&
     (await probeHasAudioStream(req.whooshPath))
-  ) {
-    ffmpegArgs.push('-i', req.whooshPath);
-    whooshInputIdx = nextInputIdx++;
-  }
+      ? req.whooshPath
+      : null;
+  const mixedSfxPath =
+    validBoomPath || validWhooshPath
+      ? await buildMixedSfxTrack({
+          workDir: req.workDir,
+          boomPath: validBoomPath,
+          whooshPath: validWhooshPath,
+          sceneCutOffsetsSec,
+          totalDurationSec: targetTotal,
+        })
+      : null;
 
-  const filterParts: string[] = [];
-  let videoMap = '0:v';
-  const burnSubtitles =
-    req.subtitleStyle.enabled &&
-    req.subtitleStyle.burnIn &&
-    (srtContent.trim().length > 0 || Boolean(req.hookBannerText));
+  const hasValidMusic = req.backgroundMusicPath
+    ? await probeHasAudioStream(req.backgroundMusicPath)
+    : false;
+  const hasValidSfx = mixedSfxPath ? await probeHasAudioStream(mixedSfxPath) : false;
 
-  if (burnSubtitles) {
-    const escapedAss = assPath.replace(/\\/g, '/').replace(/:/g, '\\:').replace(/'/g, "\\'");
-    filterParts.push(`[0:v]ass='${escapedAss}'[vout]`);
-    videoMap = '[vout]';
-  }
+  const finalVideoPath = resolveConfinedPath(req.workDir, 'final_output.mp4');
+  const buildFinalPassArgs = (includeExtras: boolean): string[] => {
+    const args: string[] = [
+      '-y',
+      ...threadFlags,
+      '-i',
+      stitchedVideoPath,
+      '-i',
+      req.narrationAudioPath,
+    ];
 
-  const audioFmt = 'aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo';
-  const narVol = req.narrationVolume ?? 1.05;
-  const useDucking = musicInputIdx !== null && req.duckingEnabled !== false;
-  const audioLayers: string[] = ['[nar]'];
-  // FFmpeg filtergraph pads can only be consumed once: split [nar] and re-pin fltp/stereo before sidechaincompress!
-  filterParts.push(
-    useDucking
-      ? `[1:a]${audioFmt},volume=${narVol},dynaudnorm=f=150:g=15,asplit=2[nar][nar_pre];[nar_pre]${audioFmt}[nar_sc]`
-      : `[1:a]${audioFmt},volume=${narVol},dynaudnorm=f=150:g=15[nar]`
-  );
+    let nextInputIdx = 2;
+    let musicInputIdx: number | null = null;
+    let sfxInputIdx: number | null = null;
 
-  if (musicInputIdx !== null) {
-    const musVol = req.musicVolume ?? 0.16;
-    const fadeOutStart = Math.max(0, targetTotal - 2);
-    if (useDucking) {
-      filterParts.push(
-        `[${musicInputIdx}:a]${audioFmt},volume=${musVol},afade=t=in:st=0:d=1.2,afade=t=out:st=${fadeOutStart.toFixed(
-          2
-        )}:d=2[mus]`,
-        `[mus][nar_sc]sidechaincompress=threshold=0.025:ratio=6:attack=20:release=240[ducked]`
-      );
-      audioLayers.push('[ducked]');
-    } else {
-      filterParts.push(
-        `[${musicInputIdx}:a]${audioFmt},volume=${musVol},afade=t=in:st=0:d=1.2,afade=t=out:st=${fadeOutStart.toFixed(
-          2
-        )}:d=2[mus]`
-      );
-      audioLayers.push('[mus]');
+    if (includeExtras && hasValidMusic && req.backgroundMusicPath) {
+      args.push('-stream_loop', '-1', '-i', req.backgroundMusicPath);
+      musicInputIdx = nextInputIdx++;
     }
-  }
-
-  if (boomInputIdx !== null) {
-    filterParts.push(`[${boomInputIdx}:a]${audioFmt},volume=0.22[boom]`);
-    audioLayers.push('[boom]');
-  }
-
-  if (whooshInputIdx !== null && sceneCutOffsetsSec.length > 0) {
-    // Cap transition whooshes to max 8 energetic cuts so sound stays punchy, never noisy
-    const step = Math.max(1, Math.ceil(sceneCutOffsetsSec.length / 8));
-    const chosenCuts = sceneCutOffsetsSec.filter((_, i) => i % step === 0).slice(0, 8);
-    if (chosenCuts.length === 1) {
-      const delayMs = Math.max(0, Math.round((chosenCuts[0] - 0.08) * 1000));
-      filterParts.push(
-        `[${whooshInputIdx}:a]${audioFmt},volume=0.20,adelay=${delayMs}|${delayMs}[w0]`
-      );
-      audioLayers.push('[w0]');
-    } else if (chosenCuts.length > 1) {
-      const splitLabels = chosenCuts.map((_, idx) => `[ws${idx}]`).join('');
-      filterParts.push(`[${whooshInputIdx}:a]${audioFmt},asplit=${chosenCuts.length}${splitLabels}`);
-      chosenCuts.forEach((sec, idx) => {
-        const delayMs = Math.max(0, Math.round((sec - 0.08) * 1000));
-        filterParts.push(`[ws${idx}]volume=0.18,adelay=${delayMs}|${delayMs}[w${idx}]`);
-        audioLayers.push(`[w${idx}]`);
-      });
+    if (includeExtras && hasValidSfx && mixedSfxPath) {
+      args.push('-i', mixedSfxPath);
+      sfxInputIdx = nextInputIdx++;
     }
-  }
 
-  let audioMap = '[nar]';
-  if (audioLayers.length > 1) {
+    const filterParts: string[] = [];
+    let videoMap = '0:v';
+    const burnSubtitles =
+      req.subtitleStyle.enabled &&
+      req.subtitleStyle.burnIn &&
+      (srtContent.trim().length > 0 || Boolean(req.hookBannerText));
+
+    if (burnSubtitles) {
+      const escapedAss = assPath.replace(/\\/g, '/').replace(/:/g, '\\:').replace(/'/g, "\\'");
+      filterParts.push(`[0:v]ass='${escapedAss}'[vout]`);
+      videoMap = '[vout]';
+    }
+
+    const audioFmt = 'aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo';
+    const narVol = req.narrationVolume ?? 1.05;
+    const useDucking = musicInputIdx !== null && req.duckingEnabled !== false;
+    const audioLayers: string[] = ['[nar]'];
+    // FFmpeg filtergraph pads can only be consumed once: split [nar] and re-pin fltp/stereo before sidechaincompress
     filterParts.push(
-      `${audioLayers.join('')}amix=inputs=${audioLayers.length}:duration=first:normalize=0:dropout_transition=2[aout]`
+      useDucking
+        ? `[1:a]${audioFmt},volume=${narVol},dynaudnorm=f=150:g=15,asplit=2[nar][nar_pre];[nar_pre]${audioFmt}[nar_sc]`
+        : `[1:a]${audioFmt},volume=${narVol},dynaudnorm=f=150:g=15[nar]`
     );
-    audioMap = '[aout]';
-  }
 
-  if (filterParts.length > 0) {
-    ffmpegArgs.push('-filter_complex', filterParts.join(';'));
-  }
+    if (musicInputIdx !== null) {
+      const musVol = req.musicVolume ?? 0.16;
+      const fadeOutStart = Math.max(0, targetTotal - 2);
+      if (useDucking) {
+        filterParts.push(
+          `[${musicInputIdx}:a]${audioFmt},volume=${musVol},afade=t=in:st=0:d=1.2,afade=t=out:st=${fadeOutStart.toFixed(
+            2
+          )}:d=2[mus]`,
+          `[mus][nar_sc]sidechaincompress=threshold=0.025:ratio=6:attack=20:release=240[ducked]`
+        );
+        audioLayers.push('[ducked]');
+      } else {
+        filterParts.push(
+          `[${musicInputIdx}:a]${audioFmt},volume=${musVol},afade=t=in:st=0:d=1.2,afade=t=out:st=${fadeOutStart.toFixed(
+            2
+          )}:d=2[mus]`
+        );
+        audioLayers.push('[mus]');
+      }
+    }
 
-  ffmpegArgs.push('-map', videoMap, '-map', audioMap);
+    if (sfxInputIdx !== null) {
+      filterParts.push(`[${sfxInputIdx}:a]${audioFmt}[sfx]`);
+      audioLayers.push('[sfx]');
+    }
 
-  if (burnSubtitles) {
-    ffmpegArgs.push(
-      '-c:v',
-      'libx264',
-      '-preset',
-      x264Preset,
-      '-crf',
-      lowMem ? '23' : '21',
-      ...x264MemParams,
-      '-pix_fmt',
-      'yuv420p'
+    let audioMap = '[nar]';
+    if (audioLayers.length > 1) {
+      filterParts.push(
+        `${audioLayers.join('')}amix=inputs=${audioLayers.length}:duration=first:normalize=0:dropout_transition=2[aout]`
+      );
+      audioMap = '[aout]';
+    }
+
+    if (filterParts.length > 0) {
+      args.push('-filter_complex', filterParts.join(';'));
+    }
+
+    args.push('-map', videoMap, '-map', audioMap);
+
+    if (burnSubtitles) {
+      args.push(
+        '-c:v',
+        'libx264',
+        '-preset',
+        x264Preset,
+        '-crf',
+        lowMem ? '23' : '21',
+        ...x264MemParams,
+        '-pix_fmt',
+        'yuv420p'
+      );
+    } else {
+      // Stream-copy video when subtitles are off (zero re-encode RAM)
+      args.push('-c:v', 'copy');
+    }
+
+    args.push(
+      '-c:a',
+      'aac',
+      '-b:a',
+      lowMem ? '128k' : '192k',
+      '-ar',
+      '44100',
+      '-max_muxing_queue_size',
+      '256',
+      '-movflags',
+      '+faststart',
+      '-shortest',
+      finalVideoPath
     );
-  } else {
-    // Stream-copy video when subtitles are off (zero re-encode RAM)
-    ffmpegArgs.push('-c:v', 'copy');
+    return args;
+  };
+
+  try {
+    await runFfmpeg(buildFinalPassArgs(true));
+  } catch (err) {
+    if (hasValidMusic || hasValidSfx) {
+      await runFfmpeg(buildFinalPassArgs(false));
+    } else {
+      throw err;
+    }
   }
-
-  ffmpegArgs.push(
-    '-c:a',
-    'aac',
-    '-b:a',
-    lowMem ? '128k' : '192k',
-    '-ar',
-    '44100',
-    '-max_muxing_queue_size',
-    '256',
-    '-movflags',
-    '+faststart',
-    '-shortest',
-    finalVideoPath
-  );
-
-  await runFfmpeg(ffmpegArgs);
   await fs.rm(stitchedVideoPath, { force: true }).catch(() => undefined);
+  if (mixedSfxPath) {
+    await fs.rm(mixedSfxPath, { force: true }).catch(() => undefined);
+  }
 
   // 5. Quality check via ffprobe
   const stats = await fs.stat(finalVideoPath);
@@ -1288,6 +1295,76 @@ async function probeHasAudioStream(filePath: string): Promise<boolean> {
   }
 }
 
+async function buildMixedSfxTrack(params: {
+  workDir: string;
+  boomPath: string | null;
+  whooshPath: string | null;
+  sceneCutOffsetsSec: number[];
+  totalDurationSec: number;
+}): Promise<string | null> {
+  const sfxOutPath = resolveConfinedPath(params.workDir, 'sfx_mixed.wav');
+  const args: string[] = [
+    '-y',
+    '-f',
+    'lavfi',
+    '-i',
+    `anullsrc=r=44100:cl=stereo:d=${Math.max(1, params.totalDurationSec).toFixed(2)}`,
+  ];
+  const audioFmt = 'aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo';
+  const filterParts: string[] = [`[0:a]${audioFmt}[base]`];
+  const mixInputs: string[] = ['[base]'];
+  let nextIdx = 1;
+
+  if (params.boomPath) {
+    args.push('-i', params.boomPath);
+    filterParts.push(`[${nextIdx}:a]${audioFmt},volume=0.22[boom]`);
+    mixInputs.push('[boom]');
+    nextIdx++;
+  }
+
+  if (params.whooshPath && params.sceneCutOffsetsSec.length > 0) {
+    const step = Math.max(1, Math.ceil(params.sceneCutOffsetsSec.length / 8));
+    const chosenCuts = params.sceneCutOffsetsSec.filter((_, i) => i % step === 0).slice(0, 8);
+    chosenCuts.forEach((sec, idx) => {
+      args.push('-i', params.whooshPath!);
+      const delayMs = Math.max(0, Math.round((sec - 0.08) * 1000));
+      filterParts.push(`[${nextIdx}:a]${audioFmt},volume=0.18,adelay=${delayMs}|${delayMs}[w${idx}]`);
+      mixInputs.push(`[w${idx}]`);
+      nextIdx++;
+    });
+  }
+
+  if (mixInputs.length <= 1) {
+    return null;
+  }
+
+  filterParts.push(
+    `${mixInputs.join('')}amix=inputs=${mixInputs.length}:duration=first:normalize=0[sfxout]`
+  );
+
+  try {
+    await execFileAsync(
+      config.ffmpegPath,
+      [
+        ...args,
+        '-filter_complex',
+        filterParts.join(';'),
+        '-map',
+        '[sfxout]',
+        '-ac',
+        '2',
+        '-ar',
+        '44100',
+        sfxOutPath,
+      ],
+      { timeout: 15_000, maxBuffer: 2 * 1024 * 1024 }
+    );
+    return sfxOutPath;
+  } catch {
+    return null;
+  }
+}
+
 async function runFfmpeg(args: string[]): Promise<void> {
   try {
     await execFileAsync(config.ffmpegPath, args, {
@@ -1300,8 +1377,12 @@ async function runFfmpeg(args: string[]): Promise<void> {
       .split(/\r?\n/)
       .map((l) => l.trim())
       .filter((l) => /matches no streams|error|invalid|no such|conversion failed|unable to/i.test(l));
+    const rawSnippet =
+      errorLines.length > 0 ? errorLines.slice(-3).join(' | ') : stderr.slice(-480);
     const snippet =
-      (errorLines.length > 0 ? errorLines.slice(-3).join(' | ') : stderr.slice(-480)).slice(-480) ||
+      (rawSnippet.length > 480
+        ? `${rawSnippet.slice(0, 220)} ... ${rawSnippet.slice(-240)}`
+        : rawSnippet) ||
       (err instanceof Error ? err.message : 'FFmpeg error');
     throw new Error(`FFmpeg render failed: ${snippet}`);
   }

@@ -12,6 +12,7 @@ import { assertSafeExternalUrl, resolveConfinedPath } from '../src/security/urlG
 import { sanitizeErrorMessage } from '../src/config/env.js';
 import {
   FallbackAIProvider,
+  enforceMicroBeatScenePacing,
   generateScriptWithAI,
   resolveLanguageMeta,
   targetWordRangeForDuration,
@@ -80,6 +81,7 @@ import {
   computeRetryBackoffSeconds,
   isPermanentError,
   reconcileClipsSubtitleCoverage,
+  resolvePipelineScriptFromCustomInput,
   shouldSkipStage,
 } from '../src/services/pipelineExecutor.js';
 import {
@@ -1161,4 +1163,128 @@ test('buildUnifiedAlignedTimeline locks visual cut boundaries strictly to spoken
   assert.ok(Math.abs(cut3Start - 7.8) < 0.001, `Scene 3 cut must be exact 7.80s, got ${cut3Start}`);
   assert.ok(Math.abs(totalDur - 10.0) < 0.001, `Total duration must equal 10.0s, got ${totalDur}`);
 });
+
+test('enforceMicroBeatScenePacing splits sluggish long scenes into rapid 1-2s micro-beats preserving every spoken word', () => {
+  const input = [
+    {
+      sceneNumber: 1,
+      narration:
+        'Nvidia built an empire on AI chips, but one reckless pricing gamble pushed their credit outlook to the brink, and Wall Street froze overnight.',
+      estimatedDuration: 9.0,
+      visualDescription: 'Nvidia silicon wafer and red Wall Street stock ticker',
+      primaryKeyword: 'nvidia microchip wafer',
+      alternativeKeywords: ['wall street red ticker', 'corporate skyscraper night'],
+      mediaTypePreference: 'video' as const,
+      transition: 'punch',
+      subtitleText:
+        'Nvidia built an empire on AI chips, but one reckless pricing gamble pushed their credit outlook to the brink, and Wall Street froze overnight.',
+    },
+  ];
+
+  const beats = enforceMicroBeatScenePacing(input, 'viral_fast');
+  assert.ok(beats.length >= 3, `Expected >= 3 micro-beats, got ${beats.length}`);
+  for (const beat of beats) {
+    const wc = beat.narration.split(/\s+/).filter(Boolean).length;
+    assert.ok(wc <= 10, `Expected <= 10 words per viral_fast micro-beat, got ${wc}: "${beat.narration}"`);
+  }
+  const joined = beats.map((b) => b.narration).join(' ');
+  assert.equal(joined, input[0].narration);
+});
+
+test('resolvePipelineScriptFromCustomInput keeps pasted user script verbatim while stripping accidental stage tags', () => {
+  const raw = '[Visual: Rocket launching] Is 1 second mein duniya ka sabse tez computer chal pada. [Zoom in] Ab har second history badal rahi hai!';
+  const resolved = resolvePipelineScriptFromCustomInput(raw, 'Fastest Computer');
+  assert.equal(
+    resolved.narrationText,
+    'Is 1 second mein duniya ka sabse tez computer chal pada. Ab har second history badal rahi hai!'
+  );
+  assert.ok(!resolved.narrationText.includes('Rocket launching'));
+  assert.ok(!resolved.narrationText.includes('Zoom in'));
+  assert.ok(resolved.wordCount >= 15);
+});
+
+test('renderVideoWithFfmpeg succeeds in low-memory RENDER mode across 7 cuts with pre-mixed SFX and ducked BGM', async () => {
+  const prevRender = process.env.RENDER;
+  process.env.RENDER = 'true';
+  const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autotube_lowmem_'));
+  try {
+    const imgPath = path.join(workDir, 'img.jpg');
+    const narPath = path.join(workDir, 'nar.wav');
+    await execFileAsync('ffmpeg', [
+      '-y',
+      '-f',
+      'lavfi',
+      '-i',
+      'color=c=navy:s=360x640:d=1',
+      '-frames:v',
+      '1',
+      imgPath,
+    ]);
+    await execFileAsync('ffmpeg', [
+      '-y',
+      '-f',
+      'lavfi',
+      '-i',
+      'sine=frequency=330:duration=12',
+      '-ac',
+      '1',
+      '-ar',
+      '24000',
+      narPath,
+    ]);
+
+    const bgmPath = await generateProceduralBgmTrack({
+      workDir,
+      mood: 'tech',
+      durationSec: 12,
+    });
+    const sfx = await generateTransitionSfxAssets(workDir);
+
+    const clips = Array.from({ length: 7 }, (_, i) => ({
+      sceneNumber: i + 1,
+      localMediaPath: imgPath,
+      mediaType: 'image' as const,
+      durationSec: 1.7,
+      subtitleText: `Micro beat number ${i + 1} spoken words`,
+      transition: i % 2 === 0 ? 'punch' : 'flash',
+    }));
+
+    const out = await renderVideoWithFfmpeg({
+      workDir,
+      clips,
+      narrationAudioPath: narPath,
+      totalNarrationDurationSec: 12,
+      format: '9:16',
+      qualityPreset: '1080p',
+      subtitleStyle: {
+        enabled: true,
+        burnIn: true,
+        preset: 'mrbeast',
+        fontSize: 44,
+        primaryColor: '#FFFFFF',
+        outlineColor: '#000000',
+        position: 'bottom_safe',
+      },
+      editingPace: 'viral_fast',
+      colorGrade: 'vibrant',
+      hookBannerText: 'Auto Cartoon Video',
+      backgroundMusicPath: bgmPath,
+      duckingEnabled: true,
+      sfxEnabled: true,
+      hookBoomPath: sfx.hookBoomPath,
+      whooshPath: sfx.whooshPath,
+    });
+
+    assert.ok(out.fileSizeBytes > 10_000);
+    assert.ok(out.durationSec >= 11.4 && out.durationSec <= 12.6);
+  } finally {
+    if (prevRender === undefined) {
+      delete process.env.RENDER;
+    } else {
+      process.env.RENDER = prevRender;
+    }
+    await fs.rm(workDir, { recursive: true, force: true });
+  }
+});
+
 

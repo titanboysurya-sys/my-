@@ -17,7 +17,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.CalendarMonth
+import androidx.compose.material.icons.rounded.EditNote
 import androidx.compose.material.icons.rounded.Explore
 import androidx.compose.material.icons.rounded.RocketLaunch
 import androidx.compose.material.icons.rounded.Schedule
@@ -114,6 +116,9 @@ fun CreateVideoScreen(
     onOpenVoiceStudio: () -> Unit,
     onGenerateVideo: (CreateProjectRequest) -> Unit
 ) {
+    var scriptMode by rememberSaveable { mutableStateOf("ai") }
+    var customScript by rememberSaveable { mutableStateOf("") }
+    var customScriptError by rememberSaveable { mutableStateOf(false) }
     var topic by rememberSaveable { mutableStateOf("") }
     var selectedNiche by rememberSaveable { mutableStateOf("Facts") }
     var selectedLanguage by rememberSaveable { mutableStateOf(settings.appLanguage) }
@@ -231,8 +236,14 @@ fun CreateVideoScreen(
             )
         }
 
-        // Topic Input + Verified Research
+        // Script Source Mode + Topic Input or Custom User Script
         item {
+            val customWordCount = remember(customScript) {
+                customScript.trim().split(Regex("\\s+")).count { it.isNotBlank() }
+            }
+            val estimatedCustomSec = remember(customWordCount) {
+                if (customWordCount == 0) 0 else (customWordCount / 2.35).toInt().coerceIn(10, 1800)
+            }
             Card(
                 shape = MaterialTheme.shapes.medium,
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -242,96 +253,170 @@ fun CreateVideoScreen(
                     modifier = Modifier.padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    OutlinedTextField(
-                        value = topic,
-                        onValueChange = { topic = it },
-                        label = { Text("Video Topic (or leave blank to research)") },
-                        placeholder = { Text("e.g., How ancient Roman concrete still heals itself") },
-                        minLines = 2,
-                        maxLines = 4,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("create_topic_input")
-                    )
-
+                    Text("Script Source", style = MaterialTheme.typography.titleMedium)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        listOf("evergreen" to "Evergreen", "trending" to "Trending", "news" to "Verified News").forEach { (id, label) ->
-                            FilterChip(
-                                selected = selectedTopicType == id,
-                                onClick = { selectedTopicType = id },
-                                label = { Text(label) }
-                            )
-                        }
+                        FilterChip(
+                            selected = scriptMode == "ai",
+                            onClick = {
+                                scriptMode = "ai"
+                                customScriptError = false
+                            },
+                            leadingIcon = {
+                                Icon(Icons.Rounded.AutoAwesome, contentDescription = null, modifier = Modifier.size(16.dp))
+                            },
+                            label = { Text("AI Viral Script") },
+                            modifier = Modifier.testTag("create_script_mode_ai_chip")
+                        )
+                        FilterChip(
+                            selected = scriptMode == "custom",
+                            onClick = { scriptMode = "custom" },
+                            leadingIcon = {
+                                Icon(Icons.Rounded.EditNote, contentDescription = null, modifier = Modifier.size(16.dp))
+                            },
+                            label = { Text("My Custom Script") },
+                            modifier = Modifier.testTag("create_script_mode_custom_chip")
+                        )
                     }
 
-                    OutlinedButton(
-                        onClick = {
-                            onResearchTopics(
-                                TopicResearchRequest(
-                                    niche = selectedNiche,
-                                    language = selectedLanguage,
-                                    audienceCountry = defaultCountryForLanguage(selectedLanguage),
-                                    contentStyle = selectedStyle,
-                                    durationSeconds = selectedDuration,
-                                    topicType = selectedTopicType,
-                                    count = 4
-                                )
-                            )
-                        },
-                        enabled = !uiState.isResearchingTopics,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(48.dp)
-                            .testTag("research_topics_button")
-                    ) {
-                        if (uiState.isResearchingTopics) {
-                            CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("Researching Verified Topics...")
-                        } else {
-                            Icon(Icons.Rounded.Explore, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("AI Research Verified Topics")
-                        }
-                    }
+                    if (scriptMode == "custom") {
+                        OutlinedTextField(
+                            value = topic,
+                            onValueChange = { topic = it },
+                            label = { Text("Video Title / Topic (optional)") },
+                            placeholder = { Text("Auto-generated from your script if left blank") },
+                            singleLine = true,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("create_custom_title_input")
+                        )
 
-                    if (uiState.topicSuggestions.isNotEmpty()) {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text(
-                                text = "Tap a suggestion to select it:",
-                                style = MaterialTheme.typography.labelLarge,
-                                color = PipelineCyan
-                            )
-                            uiState.topicSuggestions.forEach { suggestion ->
-                                Card(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable { topic = suggestion.topic },
-                                    colors = CardDefaults.cardColors(
-                                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                        OutlinedTextField(
+                            value = customScript,
+                            onValueChange = {
+                                customScript = it
+                                if (customScriptError && it.trim().length >= 10) {
+                                    customScriptError = false
+                                }
+                            },
+                            label = { Text("Paste Your Exact Voiceover Script") },
+                            placeholder = {
+                                Text("Paste your Hindi, Hinglish, or English script here. AI will voice every word verbatim and cut 1-2s visuals + synced captions to match each sentence!")
+                            },
+                            minLines = 5,
+                            maxLines = 10,
+                            isError = customScriptError,
+                            supportingText = {
+                                if (customScriptError) {
+                                    Text("Please paste at least 10 characters for your custom script.")
+                                } else {
+                                    Text(
+                                        text = if (customWordCount > 0)
+                                            "$customWordCount words • ~${estimatedCustomSec}s video • Exact 1:1 Voiceover & Visual Match"
+                                        else
+                                            "Exact words you paste become the voiceover, captions, and 1-2s visual shots",
+                                        color = PipelineCyan
                                     )
-                                ) {
-                                    Column(modifier = Modifier.padding(12.dp)) {
-                                        Text(
-                                            text = suggestion.topic,
-                                            style = MaterialTheme.typography.titleSmall
+                                }
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("create_custom_script_input")
+                        )
+                    } else {
+                        OutlinedTextField(
+                            value = topic,
+                            onValueChange = { topic = it },
+                            label = { Text("Video Topic (or leave blank to research)") },
+                            placeholder = { Text("e.g., How ancient Roman concrete still heals itself") },
+                            minLines = 2,
+                            maxLines = 4,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("create_topic_input")
+                        )
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            listOf("evergreen" to "Evergreen", "trending" to "Trending", "news" to "Verified News").forEach { (id, label) ->
+                                FilterChip(
+                                    selected = selectedTopicType == id,
+                                    onClick = { selectedTopicType = id },
+                                    label = { Text(label) }
+                                )
+                            }
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                onResearchTopics(
+                                    TopicResearchRequest(
+                                        niche = selectedNiche,
+                                        language = selectedLanguage,
+                                        audienceCountry = defaultCountryForLanguage(selectedLanguage),
+                                        contentStyle = selectedStyle,
+                                        durationSeconds = selectedDuration,
+                                        topicType = selectedTopicType,
+                                        count = 4
+                                    )
+                                )
+                            },
+                            enabled = !uiState.isResearchingTopics,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                                .testTag("research_topics_button")
+                        ) {
+                            if (uiState.isResearchingTopics) {
+                                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Researching Verified Topics...")
+                            } else {
+                                Icon(Icons.Rounded.Explore, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("AI Research Verified Topics")
+                            }
+                        }
+
+                        if (uiState.topicSuggestions.isNotEmpty()) {
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text(
+                                    text = "Tap a suggestion to select it:",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = PipelineCyan
+                                )
+                                uiState.topicSuggestions.forEach { suggestion ->
+                                    Card(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable { topic = suggestion.topic },
+                                        colors = CardDefaults.cardColors(
+                                            containerColor = MaterialTheme.colorScheme.surfaceVariant
                                         )
-                                        if (suggestion.angle.isNotBlank()) {
+                                    ) {
+                                        Column(modifier = Modifier.padding(12.dp)) {
                                             Text(
-                                                text = suggestion.angle,
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                text = suggestion.topic,
+                                                style = MaterialTheme.typography.titleSmall
                                             )
-                                        }
-                                        if (suggestion.references.isNotEmpty()) {
-                                            Text(
-                                                text = "Sources: ${suggestion.references.joinToString { it.source }}",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = PipelineCyan
-                                            )
+                                            if (suggestion.angle.isNotBlank()) {
+                                                Text(
+                                                    text = suggestion.angle,
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+                                            if (suggestion.references.isNotEmpty()) {
+                                                Text(
+                                                    text = "Sources: ${suggestion.references.joinToString { it.source }}",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = PipelineCyan
+                                                )
+                                            }
                                         }
                                     }
                                 }
@@ -421,13 +506,23 @@ fun CreateVideoScreen(
                     }
 
                     Text("Target Video Length", style = MaterialTheme.typography.titleMedium)
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        listOf(30 to "30s", 60 to "60s", 180 to "3m", 300 to "5m", 600 to "10m").forEach { (sec, label) ->
-                            FilterChip(
-                                selected = selectedDuration == sec,
-                                onClick = { selectedDuration = sec },
-                                label = { Text(label) }
-                            )
+                    if (scriptMode == "custom") {
+                        val customWords = customScript.trim().split(Regex("\\s+")).count { it.isNotBlank() }
+                        val estSec = if (customWords >= 6) (customWords / 2.35).toInt().coerceIn(10, 1800) else selectedDuration
+                        Text(
+                            text = "Auto-matched to your custom script (~${estSec}s spoken duration)",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = PipelineCyan
+                        )
+                    } else {
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf(30 to "30s", 60 to "60s", 180 to "3m", 300 to "5m", 600 to "10m").forEach { (sec, label) ->
+                                FilterChip(
+                                    selected = selectedDuration == sec,
+                                    onClick = { selectedDuration = sec },
+                                    label = { Text(label) }
+                                )
+                            }
                         }
                     }
 
@@ -720,21 +815,40 @@ fun CreateVideoScreen(
         item {
             Button(
                 onClick = {
-                    val effectiveTopic = topic.trim().ifBlank { "auto" }
+                    val trimmedCustom = customScript.trim()
+                    if (scriptMode == "custom" && trimmedCustom.length < 10) {
+                        customScriptError = true
+                        return@Button
+                    }
+                    val customWords = trimmedCustom.split(Regex("\\s+")).count { it.isNotBlank() }
+                    val effectiveDuration = if (scriptMode == "custom" && customWords >= 6) {
+                        (customWords / 2.35).toInt().coerceIn(10, 1800)
+                    } else {
+                        selectedDuration
+                    }
+                    val effectiveTopic = if (scriptMode == "custom") {
+                        topic.trim().ifBlank {
+                            trimmedCustom.lineSequence().firstOrNull { it.isNotBlank() }?.trim()?.take(90) ?: "Custom Script Video"
+                        }
+                    } else {
+                        topic.trim().ifBlank { "auto" }
+                    }
                     val customUrls = parseCustomMediaLinks(customMediaLinksText)
                     onGenerateVideo(
                         CreateProjectRequest(
                             title = if (effectiveTopic == "auto") "Auto $selectedNiche Video" else effectiveTopic.take(80),
                             topic = effectiveTopic,
+                            scriptMode = scriptMode,
+                            customScript = if (scriptMode == "custom") trimmedCustom else null,
                             niche = selectedNiche,
                             language = selectedLanguage,
                             audienceCountry = defaultCountryForLanguage(selectedLanguage),
                             contentStyle = selectedStyle,
                             topicType = selectedTopicType,
                             format = selectedFormat,
-                            durationSeconds = selectedDuration,
+                            durationSeconds = effectiveDuration,
                             qualityPreset = selectedQuality,
-                            autoProduce = autoProduce,
+                            autoProduce = if (scriptMode == "custom") true else autoProduce,
                             voiceProvider = voiceState.selectedProvider,
                             voiceId = voiceState.selectedVoiceId,
                             voiceSpeed = voiceState.voiceSpeed,

@@ -741,19 +741,20 @@ export async function generateScriptWithAI(
 
   const retentionRules =
     hookStyle === 'viral_retention'
-      ? `VIRAL RETENTION FORMULA:
-- 0-2s PATTERN-INTERRUPT HOOK: Start sentence #1 with a shocking counter-intuitive truth, bold claim, or urgent curiosity gap (ZERO slow intros or greetings).
-- EVERY 7-9s RE-HOOK TWIST: Naturally escalate curiosity with topic-specific pivots and stakes in ${lang.name} (never copy generic meta-filler or template phrases) so viewers do not swipe away.
-- SHORT PUNCHY SENTENCES: Keep average sentence length crisp (6-13 words) for breathless Shorts pacing.${
+      ? `VIRAL RETENTION ARCHITECTURE (MANDATORY):
+- 0-1.5s SCROLL-STOPPER HOOK: Sentence #1 MUST be 4-10 crisp words dropping straight into conflict, a shocking verifiable contrast, or a vivid physical moment. STRICTLY FORBIDDEN openers: "Did you know", "Have you ever wondered", "In today's world", "Imagine if", "Let's dive in", "क्या आप जानते हैं", "आज हम बात करेंगे", "तो चलिए शुरू करते हैं".
+- MICRO-RE-HOOKS EVERY 5-7 SECONDS: Every 2 sentences, pivot with tension/contrast ("लेकिन असली मोड़ तब आया", "मगर सच इसके उलट था", "तभी एक गलती ने सब बदल दिया", "But here is the catch", "Until one number changed everything") so viewers never swipe away.
+- SHOW DON'T TELL (VISUAL-FIRST WRITING): Every single sentence MUST contain concrete physical subjects, actions, numbers, places, or emotions that can be literally shown on screen in 1-2 seconds — ZERO vague abstract lecturing.
+- PUNCHY SPOKEN RHYTHM: Average 5-11 words per sentence. Conversational, natural human voice in ${lang.name} (never stiff textbook translation).${
           isShortForm
-            ? `\n- SEAMLESS LOOP ENDING: End the final sentence mid-thought or in a way that flows grammatically right back into the very first word of the hook so auto-replay feels seamless!`
+            ? `\n- SEAMLESS LOOP PAYOFF: Deliver a sharp final twist whose last words flow naturally back into the first word of the hook for effortless replay.`
             : ''
         }`
       : hookStyle === 'story_arc'
-        ? `STORYTELLING ARC: Open in the middle of the action, escalate tension with vivid concrete details, deliver an unforgettable climax reveal, and close cleanly.`
-        : `Write clear, informative, tight spoken narration with zero fluff.`;
+        ? `STORYTELLING ARC: Open right inside the tense turning point (no slow intro), build escalating stakes with vivid sensory details every 5 seconds, hit an unforgettable climax reveal, and close cleanly.`
+        : `Write crisp, concrete, engaging spoken narration with zero fluff and vivid visual nouns in every line.`;
 
-  const systemPrompt = `You are an elite viral YouTube scriptwriter and visual director.
+  const systemPrompt = `You are a top 1% YouTube retention scriptwriter and visual director whose videos achieve >85% average view duration.
 CRITICAL LANGUAGE RULE: ${lang.scriptInstruction} All spoken fields (titleIdea, hook, voiceoverScript, narrationText, ending, callToAction) MUST be written in ${lang.name}. NEVER default to English if the requested language is ${lang.name}.
 
 STRICT TWO-SECTION SEPARATION RULE (MANDATORY):
@@ -787,7 +788,7 @@ Match Voiceover Script spoken word count strictly to ${words.min}-${words.max} w
     },
     requiredJsonSchema: {
       titleIdea: `string (in ${lang.name})`,
-      hook: `string (first 2 seconds ultra-punchy spoken hook ONLY, pure speech, no brackets/visual notes, in ${lang.name})`,
+      hook: `string (first 1.5 seconds ultra-punchy spoken hook ONLY, pure speech, no brackets/visual notes, in ${lang.name})`,
       videoVisualInstructions: `string (MUST begin with "${VIDEO_VISUAL_INSTRUCTIONS_START}" and end with "${VIDEO_VISUAL_INSTRUCTIONS_END}"; put ALL scene-by-scene shot cues, camera movements, B-roll ideas, SFX, and overlays ONLY here)`,
       voiceoverScript: `string (MUST begin with "${VOICEOVER_SCRIPT_START}" and end with "${VOICEOVER_SCRIPT_END}"; 100% pure spoken words ONLY in ${lang.name}; ZERO visual instructions, ZERO brackets [], ZERO parentheses (), ZERO labels)`,
       narrationText: `string (exact same pure spoken words as inside voiceoverScript without delimiters, in ${lang.name})`,
@@ -845,6 +846,107 @@ Match Voiceover Script spoken word count strictly to ${words.min}-${words.max} w
   };
 }
 
+/**
+ * Deterministic post-breakdown pacing guard: guarantees no scene sits on a static shot for 5-8s
+ * when rapid 1-2s micro-beats are requested. Splits overly long multi-clause scenes cleanly at
+ * punctuation or word boundaries while varying search keywords so every cut gets a fresh visual.
+ */
+export function enforceMicroBeatScenePacing(
+  scenes: GeneratedScene[],
+  pace: 'viral_fast' | 'balanced' | 'cinematic',
+  maxTotalScenes = 45
+): GeneratedScene[] {
+  if (scenes.length === 0) return [];
+  const maxWordsPerBeat = pace === 'viral_fast' ? 8 : pace === 'balanced' ? 12 : 18;
+  const minSubBeatWords = 3;
+  const out: GeneratedScene[] = [];
+
+  for (const scene of scenes) {
+    const cleanNar = sanitizeSpokenNarration(scene.narration || scene.subtitleText || '');
+    const words = cleanNar.split(/\s+/).filter(Boolean);
+
+    if (words.length <= maxWordsPerBeat || out.length >= maxTotalScenes - 1) {
+      out.push({
+        ...scene,
+        narration: cleanNar,
+        subtitleText: sanitizeSpokenNarration(scene.subtitleText || '') || cleanNar,
+      });
+      continue;
+    }
+
+    // First try splitting along natural clause punctuation (., !, ?, ;, :, ।, ,)
+    const rawClauses = cleanNar
+      .split(/(?<=[.!?।,;:])\s+/)
+      .map((c) => c.trim())
+      .filter(Boolean);
+
+    const chunks: string[] = [];
+    if (rawClauses.length >= 2) {
+      let acc: string[] = [];
+      for (const clause of rawClauses) {
+        const cWords = clause.split(/\s+/).filter(Boolean);
+        if (acc.length > 0 && acc.length + cWords.length > maxWordsPerBeat) {
+          chunks.push(acc.join(' '));
+          acc = [...cWords];
+        } else {
+          acc.push(...cWords);
+        }
+      }
+      if (acc.length > 0) {
+        if (acc.length < minSubBeatWords && chunks.length > 0) {
+          chunks[chunks.length - 1] = `${chunks[chunks.length - 1]} ${acc.join(' ')}`;
+        } else {
+          chunks.push(acc.join(' '));
+        }
+      }
+    }
+
+    // If still too long (single long sentence), split evenly into balanced micro-beats
+    const finalChunks: string[] = [];
+    for (const chunk of chunks.length > 0 ? chunks : [cleanNar]) {
+      const cWords = chunk.split(/\s+/).filter(Boolean);
+      if (cWords.length <= maxWordsPerBeat) {
+        finalChunks.push(chunk);
+        continue;
+      }
+      const numParts = Math.min(4, Math.max(2, Math.ceil(cWords.length / maxWordsPerBeat)));
+      const step = Math.ceil(cWords.length / numParts);
+      for (let i = 0; i < cWords.length; i += step) {
+        const slice = cWords.slice(i, i + step);
+        if (slice.length < minSubBeatWords && finalChunks.length > 0) {
+          finalChunks[finalChunks.length - 1] = `${finalChunks[finalChunks.length - 1]} ${slice.join(' ')}`;
+        } else {
+          finalChunks.push(slice.join(' '));
+        }
+      }
+    }
+
+    const totalSubDur = Math.max(1.0 * finalChunks.length, scene.estimatedDuration);
+    const totalWords = Math.max(1, words.length);
+    const alts = [scene.primaryKeyword, ...(scene.alternativeKeywords || [])].filter(Boolean);
+
+    finalChunks.forEach((subText, subIdx) => {
+      if (out.length >= maxTotalScenes) return;
+      const subWords = subText.split(/\s+/).filter(Boolean).length;
+      const rotatedPrimary = alts[subIdx % Math.max(1, alts.length)] || scene.primaryKeyword;
+      const rotatedAlts = alts.filter((k) => k !== rotatedPrimary);
+      out.push({
+        sceneNumber: out.length + 1,
+        narration: subText,
+        estimatedDuration: Math.max(1.0, Math.round(((subWords / totalWords) * totalSubDur) * 10) / 10),
+        visualDescription: scene.visualDescription,
+        primaryKeyword: rotatedPrimary,
+        alternativeKeywords: rotatedAlts,
+        mediaTypePreference: scene.mediaTypePreference,
+        transition: subIdx === 0 ? scene.transition : subIdx % 2 === 1 ? 'cut' : 'punch',
+        subtitleText: subText,
+      });
+    });
+  }
+
+  return out.map((s, idx) => ({ ...s, sceneNumber: idx + 1 }));
+}
+
 export async function generateSceneBreakdownWithAI(
   ai: AIProviderClient,
   params: {
@@ -858,35 +960,43 @@ export async function generateSceneBreakdownWithAI(
     editingPace?: 'viral_fast' | 'balanced' | 'cinematic';
   }
 ): Promise<GeneratedScene[]> {
-  const pace = params.editingPace || (params.format === '9:16' ? 'viral_fast' : 'balanced');
-  const secPerScene = pace === 'viral_fast' ? 2.4 : pace === 'cinematic' ? 4.8 : 3.4;
-  const minScenes = pace === 'viral_fast' ? 6 : 4;
-  const maxScenes = pace === 'viral_fast' ? 26 : 20;
-  const recommendedScenes = Math.max(
-    minScenes,
-    Math.min(maxScenes, Math.round(params.durationSeconds / secPerScene))
-  );
-  const lang = resolveLanguageMeta(params.language);
-
-  const systemPrompt = `You are a precision documentary & YouTube Shorts video editor breaking a pure Voiceover Script into tightly synchronized visual scenes where EVERY SINGLE SHOT literally matches the exact words being spoken at that moment.
-RULES:
-1. VERBATIM 1:1 NARRATION COVERAGE: Split voiceoverScript sequentially from start to finish into ~${recommendedScenes} crisp visual beats (~${secPerScene.toFixed(1)}s each) so concatenating all scenes[].narration reproduces 100% of voiceoverScript in exact order without skipping, summarizing, adding, or translating a single word.
-2. SPOKEN-ONLY SUBTITLES: Both scenes[].narration and scenes[].subtitleText MUST contain ONLY the exact spoken words from voiceoverScript in ${lang.name} — NEVER copy anything from videoVisualInstructionsContext, [Scene], [Visual], camera notes, or labels into narration or subtitleText.
-3. LITERAL CONCRETE ENGLISH VISUAL QUERIES (NO METAPHOR TRAPS):
-   - Every scene's visualDescription, primaryKeyword (2-4 concrete English words), and alternativeKeywords MUST depict the EXACT literal subject, person, animal, object, place, or action being spoken in THAT beat.
-   - If the narration is in Hindi, Hinglish, or another non-English language, accurately translate the literal subject and action into clear English for visualDescription, primaryKeyword, and alternativeKeywords.
-   - NEVER search abstract nouns or literalized metaphors/idioms (e.g. NEVER search "storm", "time bomb", "secret", "danger", "facts", "future", "success", "concept", "motivation", "problem" unless the narrator is literally talking about weather or explosives!). Instead depict the real concrete scene (e.g. for "Nvidia credit rating crisis", use "nvidia microchip circuit board", "stock market red chart", "corporate skyscraper finance").
-4. SMART MEDIA TYPE ROUTING:
-   - Use mediaTypePreference: "image" whenever the beat mentions a SPECIFIC named real-world person, CEO, politician, company, brand, logo, landmark, historical figure/artifact (e.g. "Jensen Huang", "Nvidia", "Taj Mahal", "Albert Einstein") OR a cartoon / animated / fictional storybook character — so real Wikimedia/Openverse photos or Lexica/AI Horde illustrations match accurately.
-   - Use mediaTypePreference: "video" for concrete filmable stock actions and real-world scenes (e.g. "engineer soldering microchip", "stock ticker red screen", "doctor examining xray", "rocket launch pad fire").
-   - Use energetic transitions from ["punch", "flash", "cut", "slide", "zoom"].
-Return strictly valid JSON.`;
-
   const parsedVoiceover = parseDelimitedScriptSections(params.narrationText);
   const cleanScript =
     parsedVoiceover.voiceoverScript || sanitizeSpokenNarration(params.narrationText) || params.narrationText;
   const visualContext =
     (params.visualInstructions || '').trim() || parsedVoiceover.videoVisualInstructions;
+
+  const pace = params.editingPace || (params.format === '9:16' ? 'viral_fast' : 'balanced');
+  const secPerScene = pace === 'viral_fast' ? 1.65 : pace === 'cinematic' ? 3.4 : 2.3;
+  const targetWordsPerBeat = pace === 'viral_fast' ? 5 : pace === 'cinematic' ? 10 : 7;
+  const minScenes = 3;
+  const maxScenes = pace === 'viral_fast' ? 45 : pace === 'balanced' ? 32 : 24;
+
+  const spokenWordsCount = cleanScript.split(/\s+/).filter(Boolean).length;
+  const estDurationFromWords = spokenWordsCount > 0 ? spokenWordsCount / 2.35 : params.durationSeconds;
+  const effectiveDuration = Math.max(8, spokenWordsCount >= 12 ? estDurationFromWords : params.durationSeconds);
+
+  const byWords = spokenWordsCount >= 12 ? Math.round(spokenWordsCount / targetWordsPerBeat) : 0;
+  const byDuration = Math.round(effectiveDuration / secPerScene);
+  const recommendedScenes = Math.max(
+    minScenes,
+    Math.min(maxScenes, byWords > 0 ? Math.max(byWords, Math.min(maxScenes, byDuration)) : byDuration)
+  );
+  const lang = resolveLanguageMeta(params.language);
+
+  const systemPrompt = `You are a precision documentary & YouTube Shorts video editor breaking a pure Voiceover Script into rapid, tightly synchronized 1-2 second micro-scenes where EVERY SINGLE CUT literally depicts the exact phrase/words spoken at that exact moment.
+RULES:
+1. VERBATIM 1:1 WORD-FOR-WORD COVERAGE: Split voiceoverScript sequentially from start to finish into ~${recommendedScenes} rapid micro-beats (~${secPerScene.toFixed(1)}s and ~${targetWordsPerBeat} words each; NEVER lump long multi-sentence paragraphs into one scene!) so concatenating all scenes[].narration reproduces 100% of voiceoverScript in exact chronological order without skipping, summarizing, adding, or translating a single word.
+2. SPOKEN-ONLY SUBTITLES: Both scenes[].narration and scenes[].subtitleText MUST contain ONLY the exact spoken words from voiceoverScript in ${lang.name} — NEVER copy anything from videoVisualInstructionsContext, [Scene], [Visual], camera notes, or labels into narration or subtitleText.
+3. MICRO-BEAT LITERAL VISUAL QUERIES (SENTENCE-BY-SENTENCE & WORD-BY-WORD MATCH):
+   - Every single scene's visualDescription, primaryKeyword (2-4 concrete English words), and alternativeKeywords MUST depict the SPECIFIC literal subject, person, animal, object, number, or action spoken inside THAT exact 1-2 second beat — NEVER repeat the same generic query across consecutive scenes!
+   - If the narration is in Hindi, Hinglish, or another non-English language, accurately translate the literal subject and action of THAT beat into clear English for visualDescription, primaryKeyword, and alternativeKeywords.
+   - NEVER search abstract nouns or literalized metaphors/idioms (e.g. NEVER search "storm", "time bomb", "secret", "danger", "facts", "future", "success", "concept", "motivation", "problem" unless the narrator is literally talking about weather or explosives!). Instead depict the real concrete scene (e.g. for "Nvidia credit rating crisis", use "nvidia microchip circuit board", "stock market red chart", "corporate skyscraper finance").
+4. SMART MEDIA TYPE ROUTING:
+   - Use mediaTypePreference: "image" whenever the beat mentions a SPECIFIC named real-world person, CEO, politician, company, brand, logo, landmark, historical figure/artifact (e.g. "Jensen Huang", "Nvidia", "Taj Mahal", "Albert Einstein") OR a cartoon / animated / fictional storybook character — so real Wikimedia/Openverse photos or Lexica/AI Horde illustrations match accurately.
+   - Use mediaTypePreference: "video" for concrete filmable stock actions and real-world scenes (e.g. "engineer soldering microchip", "stock ticker red screen", "doctor examining xray", "rocket launch pad fire").
+   - Use snappy transitions from ["punch", "flash", "cut", "slide", "zoom"].
+Return strictly valid JSON.`;
 
   const userPrompt = JSON.stringify({
     topic: params.topic,
@@ -895,18 +1005,20 @@ Return strictly valid JSON.`;
     narrationLanguageName: lang.name,
     format: params.format,
     editingPace: pace,
-    targetTotalDurationSeconds: params.durationSeconds,
+    targetTotalDurationSeconds: Math.round(effectiveDuration),
+    spokenWordCount: spokenWordsCount,
     recommendedSceneCount: recommendedScenes,
+    maxWordsPerSceneBeat: pace === 'viral_fast' ? 8 : pace === 'balanced' ? 12 : 16,
     voiceoverScript: cleanScript,
     videoVisualInstructionsContext: visualContext || undefined,
     requiredJsonSchema: {
       scenes: [
         {
           sceneNumber: 1,
-          narration: `exact verbatim spoken segment from voiceoverScript in ${lang.name} (NEVER visual cues)`,
+          narration: `exact verbatim short spoken beat (${targetWordsPerBeat} words) from voiceoverScript in ${lang.name} (NEVER visual cues)`,
           estimatedDuration: secPerScene,
-          visualDescription: 'concrete literal physical visual scene depicting exactly what is spoken in this beat (in English)',
-          primaryKeyword: 'concrete 2-4 word english visual search query',
+          visualDescription: 'concrete literal physical visual scene depicting the exact words spoken in this 1-2s beat (in English)',
+          primaryKeyword: 'concrete 2-4 word english visual search query specific to this beat',
           alternativeKeywords: ['concrete english alt query 1', 'concrete english alt query 2'],
           mediaTypePreference: 'video or image (image for named people/brands/landmarks/cartoons)',
           transition: 'punch',
@@ -917,25 +1029,27 @@ Return strictly valid JSON.`;
   });
 
   const result = await ai.generateJson<{ scenes: GeneratedScene[] }>(systemPrompt, userPrompt);
-  const scenes = Array.isArray(result.scenes) ? result.scenes : [];
-  if (scenes.length === 0) {
+  const rawScenes = Array.isArray(result.scenes) ? result.scenes : [];
+  if (rawScenes.length === 0) {
     throw new Error('Scene breakdown produced zero scenes.');
   }
-  return scenes.map((s, idx) => {
+  const normalized = rawScenes.map((s, idx) => {
     const cleanNar = sanitizeSpokenNarration(s.narration || '');
     const cleanSub = sanitizeSpokenNarration(s.subtitleText || '') || cleanNar;
     return {
       sceneNumber: idx + 1,
       narration: cleanNar,
-      estimatedDuration: Math.max(1.5, Number(s.estimatedDuration || secPerScene)),
+      estimatedDuration: Math.max(1.0, Number(s.estimatedDuration || secPerScene)),
       visualDescription: (s.visualDescription || params.topic).trim(),
       primaryKeyword: (s.primaryKeyword || params.niche).trim(),
       alternativeKeywords: Array.isArray(s.alternativeKeywords) ? s.alternativeKeywords : [],
       mediaTypePreference: s.mediaTypePreference === 'image' ? 'image' : 'video',
       transition: s.transition || (idx === 0 ? 'punch' : 'cut'),
       subtitleText: cleanSub,
-    };
+    } satisfies GeneratedScene;
   });
+
+  return enforceMicroBeatScenePacing(normalized, pace, maxScenes);
 }
 
 export interface SceneVisualCandidateSummary {

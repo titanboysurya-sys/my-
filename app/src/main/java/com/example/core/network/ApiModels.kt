@@ -237,6 +237,8 @@ data class TopicResearchResponse(
 data class CreateProjectRequest(
     val title: String? = null,
     val topic: String,
+    val scriptMode: String = "ai",
+    val customScript: String? = null,
     val niche: String = "Facts",
     val language: String = "en",
     val audienceCountry: String = "US",

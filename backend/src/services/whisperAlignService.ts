@@ -273,7 +273,15 @@ export function validateSceneTimingHints(
   expectedSceneNumbers: number[],
   totalDurationSec: number
 ): SceneTimingHint[] | null {
-  if (expectedSceneNumbers.length === 0 || hints.length !== expectedSceneNumbers.length) {
+  if (expectedSceneNumbers.length === 0 || hints.length === 0) {
+    return null;
+  }
+
+  const minRequired = Math.max(
+    expectedSceneNumbers.length <= 2 ? expectedSceneNumbers.length : 2,
+    Math.ceil(expectedSceneNumbers.length * 0.7)
+  );
+  if (hints.length < minRequired) {
     return null;
   }
 
@@ -283,7 +291,7 @@ export function validateSceneTimingHints(
     const startSec = Number(h.startSec);
     const endSec = Number(h.endSec);
     if (!Number.isFinite(num) || !Number.isFinite(startSec) || !Number.isFinite(endSec)) {
-      return null;
+      continue;
     }
     byScene.set(num, {
       sceneNumber: num,
@@ -292,16 +300,44 @@ export function validateSceneTimingHints(
     });
   }
 
+  const matchedCount = expectedSceneNumbers.filter((num) => byScene.has(num)).length;
+  if (matchedCount < minRequired) {
+    return null;
+  }
+
+  // Build ordered slots and smoothly interpolate any rare skipped scene between neighbors
+  const rawSlots: Array<SceneTimingHint | null> = expectedSceneNumbers.map(
+    (num) => byScene.get(num) || null
+  );
+
+  for (let i = 0; i < rawSlots.length; i++) {
+    if (rawSlots[i]) continue;
+    let left = i - 1;
+    while (left >= 0 && !rawSlots[left]) left--;
+    let right = i + 1;
+    while (right < rawSlots.length && !rawSlots[right]) right++;
+
+    const gapStart = left >= 0 ? rawSlots[left]!.endSec : 0;
+    const gapEnd = right < rawSlots.length ? Math.max(gapStart + 0.3, rawSlots[right]!.startSec) : totalDurationSec;
+    const span = right - left;
+    const slice = Math.max(0.25, (gapEnd - gapStart) / Math.max(1, span - 1));
+    const s = gapStart + (i - left - 1) * slice;
+    rawSlots[i] = {
+      sceneNumber: expectedSceneNumbers[i],
+      startSec: Math.min(totalDurationSec, s),
+      endSec: Math.min(totalDurationSec, s + slice),
+    };
+  }
+
   const ordered: SceneTimingHint[] = [];
   let prevEnd = 0;
-  for (const num of expectedSceneNumbers) {
-    const item = byScene.get(num);
-    if (!item) return null;
+  for (let i = 0; i < expectedSceneNumbers.length; i++) {
+    const item = rawSlots[i]!;
     const startSec = Math.max(prevEnd, item.startSec);
-    const endSec = Math.max(startSec + 0.25, item.endSec);
+    const endSec = Math.max(startSec + 0.2, item.endSec);
     if (startSec > totalDurationSec + 0.4) return null;
     ordered.push({
-      sceneNumber: num,
+      sceneNumber: expectedSceneNumbers[i],
       startSec,
       endSec: Math.min(totalDurationSec, endSec),
     });
@@ -309,7 +345,7 @@ export function validateSceneTimingHints(
   }
 
   const coveredSpan = ordered[ordered.length - 1].endSec - ordered[0].startSec;
-  if (coveredSpan < Math.max(2, totalDurationSec * 0.6)) {
+  if (coveredSpan < Math.max(2, totalDurationSec * 0.55)) {
     return null;
   }
   return ordered;

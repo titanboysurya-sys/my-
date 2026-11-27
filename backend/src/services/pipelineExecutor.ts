@@ -31,7 +31,11 @@ import {
   type SubtitleStyleConfig,
   type TimelineSceneClip,
 } from './ffmpegRenderer.js';
-import { parseDelimitedScriptSections, sanitizeSpokenNarration } from './narrationSanitizer.js';
+import {
+  formatDelimitedScriptDocument,
+  parseDelimitedScriptSections,
+  sanitizeSpokenNarration,
+} from './narrationSanitizer.js';
 import {
   autoBgmMoodForNiche,
   generateProceduralBgmTrack,
@@ -154,6 +158,52 @@ export function reconcileClipsSubtitleCoverage(
   });
 }
 
+/**
+ * Parses a user-pasted custom script cleanly so the exact spoken narration is preserved
+ * 100% verbatim for TTS and captions, while any optional [Visual] notes or delimiters
+ * are separated into videoVisualInstructions for the scene visual director.
+ */
+export function resolvePipelineScriptFromCustomInput(
+  rawCustomScript: string,
+  fallbackTitle: string
+): {
+  titleIdea: string;
+  hook: string;
+  narrationText: string;
+  fullScript: string;
+  visualInstructions: string;
+  ending: string;
+  wordCount: number;
+  estimatedDurationSec: number;
+} {
+  const trimmed = rawCustomScript.trim();
+  const parsed = parseDelimitedScriptSections(trimmed);
+  const narrationText =
+    (parsed.hasExplicitDelimiters && parsed.voiceoverScript) ||
+    parsed.voiceoverScript ||
+    sanitizeSpokenNarration(trimmed) ||
+    trimmed;
+  const words = narrationText.split(/\s+/).filter(Boolean);
+  const sentences = narrationText
+    .split(/(?<=[.!?।])\s+|\r?\n+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const hook = sentences[0] || words.slice(0, 10).join(' ');
+  const ending = sentences.length > 1 ? sentences[sentences.length - 1] : '';
+  const estimatedDurationSec = Math.max(8, Math.round(words.length / 2.35));
+
+  return {
+    titleIdea: (fallbackTitle || hook || 'Custom Script Video').slice(0, 100),
+    hook: hook.slice(0, 180),
+    narrationText,
+    fullScript: formatDelimitedScriptDocument(narrationText, parsed.videoVisualInstructions || ''),
+    visualInstructions: parsed.videoVisualInstructions || '',
+    ending: ending.slice(0, 180),
+    wordCount: words.length,
+    estimatedDurationSec,
+  };
+}
+
 async function recordNotification(params: {
   userId: string;
   projectId: string;
@@ -247,6 +297,8 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
       whisper_sync?: boolean;
       hook_style?: 'viral_retention' | 'story_arc' | 'standard';
       hook_banner?: boolean;
+      script_mode?: 'ai' | 'custom';
+      custom_script?: string | null;
     };
 
     const editingPace = normalizeEditingPace(
@@ -432,63 +484,107 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
       .limit(1)
       .maybeSingle();
 
+    const customScriptRaw =
+      typeof uploadCfgTop.custom_script === 'string' ? uploadCfgTop.custom_script.trim() : '';
+    const isCustomScriptMode =
+      uploadCfgTop.script_mode === 'custom' && customScriptRaw.length >= 10;
+
     if (!shouldSkipStage(completedStages, 'generating_script') || !latestScript) {
-      await updateJobStage(job.id, project.id, 'generating_script', 18, 'Writing high-retention viral narration script', completedStages);
-      const generated = await generateScriptWithAI(ai, {
-        topic: resolvedTopic,
-        niche: project.niche,
-        language: project.language,
-        contentStyle: project.content_style,
-        durationSeconds: project.duration_seconds,
-        hookStyle,
-        references,
-      });
-
-      const nextVersion = (latestScript?.version || 0) + 1;
-      const { data: savedScript, error: scriptErr } = await supabase
-        .from('scripts')
-        .insert({
-          user_id: job.user_id,
-          project_id: project.id,
-          version: nextVersion,
-          title_idea: generated.titleIdea,
-          hook: generated.hook,
-          narration_text: generated.narrationText,
-          script_text: generated.fullScript,
-          ending: generated.ending,
-          call_to_action: generated.callToAction,
-          word_count: generated.wordCount,
-          approved: Boolean(project.auto_produce),
-        })
-        .select('*')
-        .single();
-
-      if (scriptErr || !savedScript) {
-        throw new Error(`Failed to persist generated script: ${scriptErr?.message}`);
-      }
-      latestScript = savedScript;
-      markStageDone('generating_script');
-
-      await recordNotification({
-        userId: job.user_id,
-        projectId: project.id,
-        jobId: job.id,
-        eventType: 'script_completed',
-        title: 'Script ready',
-        body: `Generated ${generated.wordCount}-word script for "${generated.titleIdea}".`,
-      });
-
-      // Manual approval gate when Autopilot is disabled for this project
-      if (!project.auto_produce) {
+      if (isCustomScriptMode) {
         await updateJobStage(
           job.id,
           project.id,
-          'awaiting_approval',
-          22,
-          'Script generated — review and approve to continue video production',
+          'generating_script',
+          18,
+          'Preparing your exact custom script for visual scene breakdown',
           completedStages
         );
-        return;
+        const customParsed = resolvePipelineScriptFromCustomInput(
+          customScriptRaw,
+          project.title || resolvedTopic
+        );
+        const nextVersion = (latestScript?.version || 0) + 1;
+        const { data: savedScript, error: scriptErr } = await supabase
+          .from('scripts')
+          .insert({
+            user_id: job.user_id,
+            project_id: project.id,
+            version: nextVersion,
+            title_idea: customParsed.titleIdea,
+            hook: customParsed.hook,
+            narration_text: customParsed.narrationText,
+            script_text: customParsed.fullScript,
+            ending: customParsed.ending,
+            call_to_action: '',
+            word_count: customParsed.wordCount,
+            approved: true,
+          })
+          .select('*')
+          .single();
+
+        if (scriptErr || !savedScript) {
+          throw new Error(`Failed to persist custom script: ${scriptErr?.message}`);
+        }
+        latestScript = savedScript;
+        markStageDone('generating_script');
+      } else {
+        await updateJobStage(job.id, project.id, 'generating_script', 18, 'Writing high-retention viral narration script', completedStages);
+        const generated = await generateScriptWithAI(ai, {
+          topic: resolvedTopic,
+          niche: project.niche,
+          language: project.language,
+          contentStyle: project.content_style,
+          durationSeconds: project.duration_seconds,
+          hookStyle,
+          references,
+        });
+
+        const nextVersion = (latestScript?.version || 0) + 1;
+        const { data: savedScript, error: scriptErr } = await supabase
+          .from('scripts')
+          .insert({
+            user_id: job.user_id,
+            project_id: project.id,
+            version: nextVersion,
+            title_idea: generated.titleIdea,
+            hook: generated.hook,
+            narration_text: generated.narrationText,
+            script_text: generated.fullScript,
+            ending: generated.ending,
+            call_to_action: generated.callToAction,
+            word_count: generated.wordCount,
+            approved: Boolean(project.auto_produce),
+          })
+          .select('*')
+          .single();
+
+        if (scriptErr || !savedScript) {
+          throw new Error(`Failed to persist generated script: ${scriptErr?.message}`);
+        }
+        latestScript = savedScript;
+        markStageDone('generating_script');
+
+        await recordNotification({
+          userId: job.user_id,
+          projectId: project.id,
+          jobId: job.id,
+          eventType: 'script_completed',
+          title: 'Script ready',
+          body: `Generated ${generated.wordCount}-word script for "${generated.titleIdea}".`,
+        });
+
+        // Manual approval gate when Autopilot is disabled for this project
+        if (!project.auto_produce) {
+          await updateJobStage(
+            job.id,
+            project.id,
+            'awaiting_approval',
+            22,
+            'Script generated — review and approve to continue video production',
+            completedStages
+          );
+          return;
+        }
       }
     }
 
@@ -503,7 +599,7 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
       .order('scene_number', { ascending: true });
 
     if (!shouldSkipStage(completedStages, 'generating_scenes') || !scenes || scenes.length === 0) {
-      await updateJobStage(job.id, project.id, 'generating_scenes', 28, 'Breaking script into fast-paced visual scenes', completedStages);
+      await updateJobStage(job.id, project.id, 'generating_scenes', 28, 'Breaking script into rapid 1-2s visual micro-scenes', completedStages);
       const parsedFromSavedScript = parseDelimitedScriptSections(
         latestScript.script_text || latestScript.narration_text || ''
       );
@@ -512,13 +608,18 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
         parsedFromSavedScript.voiceoverScript ||
         latestScript.narration_text ||
         latestScript.script_text;
+      const scriptWordCount = pureVoiceoverForScenes.split(/\s+/).filter(Boolean).length;
+      const sceneBreakdownDuration =
+        isCustomScriptMode && scriptWordCount >= 6
+          ? Math.max(10, Math.round(scriptWordCount / 2.35))
+          : project.duration_seconds;
       const breakdown = await generateSceneBreakdownWithAI(ai, {
         narrationText: pureVoiceoverForScenes,
         visualInstructions: parsedFromSavedScript.videoVisualInstructions || undefined,
         topic: resolvedTopic,
         niche: project.niche,
         language: project.language,
-        durationSeconds: project.duration_seconds,
+        durationSeconds: sceneBreakdownDuration,
         format: project.format,
         editingPace,
       });
@@ -583,10 +684,9 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
         ? uploadCfgTop.media_source_mode
         : 'all';
 
-    const scenesToVerify: Array<{
+    const pendingSearchTasks: Array<{
       scene: (typeof scenes)[number];
       searchInput: SceneMediaSearchInput;
-      candidates: ScoredMediaCandidate[];
     }> = [];
 
     for (let i = 0; i < scenes.length; i++) {
@@ -630,30 +730,53 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
         }
       }
 
-      const searchInput: SceneMediaSearchInput = {
-        userId: job.user_id,
-        projectId: project.id,
-        sceneId: scene.id,
-        narration: scene.narration,
-        visualDescription: scene.visual_description,
-        primaryKeyword: scene.primary_keyword,
-        alternativeKeywords: cleanKeywords,
-        preferredType: scene.media_type_preference === 'image' ? 'image' : 'video',
-        targetDurationSec: Number(scene.duration || 5),
-        format: project.format,
-        usedExternalIds,
-        mediaSourceMode,
-        customMediaUrl: sceneCustomUrl,
-        niche: project.niche,
-        contentStyle: project.content_style,
-      };
+      pendingSearchTasks.push({
+        scene,
+        searchInput: {
+          userId: job.user_id,
+          projectId: project.id,
+          sceneId: scene.id,
+          narration: scene.narration,
+          visualDescription: scene.visual_description,
+          primaryKeyword: scene.primary_keyword,
+          alternativeKeywords: cleanKeywords,
+          preferredType: scene.media_type_preference === 'image' ? 'image' : 'video',
+          targetDurationSec: Number(scene.duration || 5),
+          format: project.format,
+          usedExternalIds,
+          mediaSourceMode,
+          customMediaUrl: sceneCustomUrl,
+          niche: project.niche,
+          contentStyle: project.content_style,
+        },
+      });
+    }
 
-      const { customMatch, candidates } = await gatherSceneMediaCandidates(searchInput);
-      if (customMatch) {
-        usedExternalIds.add(customMatch.externalId);
-        pendingDownloads.push({ scene, candidate: customMatch });
-      } else {
-        scenesToVerify.push({ scene, searchInput, candidates });
+    // Gather media candidate pools in bounded batches of 3 scenes for fast execution across micro-scenes
+    const scenesToVerify: Array<{
+      scene: (typeof scenes)[number];
+      searchInput: SceneMediaSearchInput;
+      candidates: ScoredMediaCandidate[];
+    }> = [];
+    for (let b = 0; b < pendingSearchTasks.length; b += 3) {
+      const batch = pendingSearchTasks.slice(b, b + 3);
+      const gatheredBatch = await Promise.all(
+        batch.map(async (item) => ({
+          ...item,
+          res: await gatherSceneMediaCandidates(item.searchInput),
+        }))
+      );
+      for (const item of gatheredBatch) {
+        if (item.res.customMatch) {
+          usedExternalIds.add(item.res.customMatch.externalId);
+          pendingDownloads.push({ scene: item.scene, candidate: item.res.customMatch });
+        } else {
+          scenesToVerify.push({
+            scene: item.scene,
+            searchInput: item.searchInput,
+            candidates: item.res.candidates,
+          });
+        }
       }
     }
 

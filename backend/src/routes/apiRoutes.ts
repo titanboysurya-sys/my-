@@ -532,14 +532,16 @@ apiRouter.post('/projects', sensitiveRateLimiter, async (req: AuthenticatedReque
     const userId = getAuthUserId(req);
     const schema = z.object({
       title: z.string().min(1).max(120).optional(),
-      topic: z.string().min(2).max(300),
+      topic: z.string().max(300).default(''),
+      scriptMode: z.enum(['ai', 'custom']).default('ai'),
+      customScript: z.string().max(25000).optional(),
       niche: z.string().min(2).max(60).default('Facts'),
       language: z.string().min(2).max(16).default('en'),
       audienceCountry: z.string().min(2).max(16).default('US'),
       contentStyle: z.string().min(2).max(50).default('documentary'),
       topicType: z.enum(['evergreen', 'trending', 'news']).default('evergreen'),
       format: z.enum(['9:16', '16:9', '1:1']).default('9:16'),
-      durationSeconds: z.number().int().min(15).max(1800).default(60),
+      durationSeconds: z.number().int().min(10).max(1800).default(60),
       qualityPreset: z.enum(['720p', '1080p']).default('1080p'),
       autoProduce: z.boolean().default(true),
       voiceProvider: z.enum(['gemini_tts', 'elevenlabs']).default('gemini_tts'),
@@ -569,6 +571,33 @@ apiRouter.post('/projects', sensitiveRateLimiter, async (req: AuthenticatedReque
       startImmediately: z.boolean().default(true),
     });
     const body = schema.parse(req.body);
+
+    const trimmedCustomScript = (body.customScript || '').trim();
+    const isCustomScript = body.scriptMode === 'custom' || trimmedCustomScript.length >= 10;
+    if (isCustomScript && trimmedCustomScript.length < 10) {
+      res.status(400).json({ error: 'Custom script must be at least 10 characters long.' });
+      return;
+    }
+
+    const parsedCustom = isCustomScript ? parseDelimitedScriptSections(trimmedCustomScript) : null;
+    const spokenCustomPreview =
+      parsedCustom?.voiceoverScript || sanitizeSpokenNarration(trimmedCustomScript) || trimmedCustomScript;
+    const effectiveTopic =
+      body.topic.trim().length >= 2
+        ? body.topic.trim()
+        : spokenCustomPreview.split(/\r?\n/)[0].trim().slice(0, 120) || 'Custom Script Video';
+
+    if (!isCustomScript && effectiveTopic.length < 2) {
+      res.status(400).json({ error: 'Enter a video topic (at least 2 characters) or paste a custom script.' });
+      return;
+    }
+
+    const customWordCount = isCustomScript ? spokenCustomPreview.split(/\s+/).filter(Boolean).length : 0;
+    const effectiveDuration =
+      isCustomScript && customWordCount >= 6
+        ? Math.min(1800, Math.max(10, Math.round(customWordCount / 2.35)))
+        : body.durationSeconds;
+
     if (body.startImmediately) {
       await enforceUserJobQuota(userId);
     }
@@ -587,17 +616,17 @@ apiRouter.post('/projects', sensitiveRateLimiter, async (req: AuthenticatedReque
       .from('projects')
       .insert({
         user_id: userId,
-        title: body.title?.trim() || body.topic.trim().slice(0, 90),
-        topic: body.topic.trim(),
+        title: body.title?.trim() || effectiveTopic.slice(0, 90),
+        topic: effectiveTopic,
         niche: body.niche,
         language: body.language,
         audience_country: body.audienceCountry,
         content_style: body.contentStyle,
         topic_type: body.topicType,
         format: body.format,
-        duration_seconds: body.durationSeconds,
+        duration_seconds: effectiveDuration,
         quality_preset: body.qualityPreset,
-        auto_produce: body.autoProduce,
+        auto_produce: isCustomScript ? true : body.autoProduce,
         voice_provider: body.voiceProvider,
         voice_id: body.voiceId,
         voice_speed: body.voiceSpeed,
@@ -626,6 +655,8 @@ apiRouter.post('/projects', sensitiveRateLimiter, async (req: AuthenticatedReque
           whisper_sync: body.whisperSync,
           hook_style: body.hookStyle,
           hook_banner: body.hookBannerEnabled,
+          script_mode: isCustomScript ? 'custom' : 'ai',
+          custom_script: isCustomScript ? trimmedCustomScript : null,
         },
         status: 'queued',
       })
@@ -807,20 +838,41 @@ apiRouter.put('/projects/:id/script', async (req: AuthenticatedRequest, res: Res
     if (body.approveAndContinue) {
       await supabase
         .from('projects')
-        .update({ auto_produce: true, status: 'queued' })
+        .update({ auto_produce: true, status: 'queued', narration_audio_path: null })
         .eq('id', projectId)
         .eq('user_id', userId);
 
-      await supabase
+      // Clear stale scenes & media so pipeline rebuilds fresh visual cuts and audio for the updated script
+      await supabase.from('media_assets').delete().eq('project_id', projectId).eq('user_id', userId);
+      await supabase.from('scenes').delete().eq('project_id', projectId).eq('user_id', userId);
+
+      const { data: resumed } = await supabase
         .from('video_jobs')
         .update({
           status: 'queued',
           status_message: 'Script approved — resuming cloud production pipeline',
+          completed_stages: ['researching', 'generating_script'],
           next_retry_at: null,
         })
         .eq('project_id', projectId)
         .eq('user_id', userId)
-        .eq('status', 'awaiting_approval');
+        .eq('status', 'awaiting_approval')
+        .select('id');
+
+      if (!resumed || resumed.length === 0) {
+        await enforceUserJobQuota(userId);
+        await supabase.from('video_jobs').insert({
+          user_id: userId,
+          project_id: projectId,
+          job_type: 'render_only',
+          status: 'queued',
+          current_stage: 'queued',
+          progress: 22,
+          completed_stages: ['researching', 'generating_script'],
+          status_message: 'Rebuilding scenes, voiceover & visuals from your edited script',
+          idempotency_key: `script-edit-${projectId}-${crypto.randomUUID()}`,
+        });
+      }
     }
 
     res.json({ script });

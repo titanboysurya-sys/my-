@@ -4,7 +4,13 @@ import { promisify } from 'node:util';
 import { config } from '../config/env.js';
 import { resolveConfinedPath } from '../security/urlGuard.js';
 import { sanitizeSpokenNarration } from './narrationSanitizer.js';
-import { mapScriptWordsToWhisperTimings, type WordTimestamp } from './whisperAlignService.js';
+import {
+  alignFullScriptWordsGlobally,
+  distributeWordsAcrossSpeechIntervals,
+  type AudioSpeechInterval,
+  type SceneTimingHint,
+  type WordTimestamp,
+} from './whisperAlignService.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -50,6 +56,8 @@ export interface RenderVideoRequest {
   colorGrade?: ColorGradePreset;
   hookBannerText?: string | null;
   whisperWords?: WordTimestamp[];
+  speechIntervals?: AudioSpeechInterval[];
+  geminiSceneTimings?: SceneTimingHint[];
   backgroundMusicPath?: string | null;
   musicVolume?: number;
   narrationVolume?: number;
@@ -96,15 +104,16 @@ export function calibrateClipDurations(
 
   const weights = clips.map((clip) => {
     const clean = (clip.subtitleText || '').trim();
-    if (!clean) return Math.max(1.5, clip.durationSec);
+    if (!clean) return Math.max(0.8, clip.durationSec);
     const words = clean.split(/\s+/).filter(Boolean).length;
     const chars = clean.replace(/\s+/g, '').length;
     // Blend word & character count so both English and Devanagari/CJK pacing stay accurate
-    return Math.max(1.5, words * 0.65 + (chars / 5) * 0.35);
+    return Math.max(0.8, words * 0.65 + (chars / 5) * 0.35);
   });
 
   const sumWeight = weights.reduce((a, b) => a + b, 0) || 1;
-  const minSceneSec = Math.min(1.8, targetTotal / clips.length);
+  // Keep minimum scene cut nimble (0.65s) so short punch scenes do not push later captions late
+  const minSceneSec = Math.min(0.65, targetTotal / clips.length);
 
   const rawDurations = weights.map((w) => Math.max(minSceneSec, (w / sumWeight) * targetTotal));
   const rawSum = rawDurations.reduce((a, b) => a + b, 0) || targetTotal;
@@ -125,28 +134,224 @@ function splitCaptionChunks(text: string, maxWordsPerChunk: number): string[] {
   return chunks;
 }
 
-/**
- * Generates synchronized phrase-level SRT subtitles from scene durations & narration text.
- */
-export function buildSynchronizedSrt(clips: TimelineSceneClip[]): string {
-  const entries: string[] = [];
-  let cursorSec = 0;
-  let index = 1;
+export interface AlignedClipTimeline {
+  clips: TimelineSceneClip[];
+  wordTimingsByScene: WordTimestamp[][];
+  hasRealAudioSync: boolean;
+}
 
-  for (const clip of clips) {
-    const chunks = splitCaptionChunks(clip.subtitleText, 5);
-    if (chunks.length === 0) {
-      cursorSec += clip.durationSec;
-      continue;
+/**
+ * Computes a single unified timeline of spoken word timestamps AND matching scene cut
+ * durations across the entire audio track so voiceover, burned ASS captions, exported SRT,
+ * and scene cuts never drift apart.
+ */
+export function buildUnifiedAlignedTimeline(
+  clips: TimelineSceneClip[],
+  totalDurationSec: number,
+  options?: {
+    whisperWords?: WordTimestamp[];
+    speechIntervals?: AudioSpeechInterval[];
+    geminiSceneTimings?: SceneTimingHint[];
+  }
+): AlignedClipTimeline {
+  const safeTotal = Math.max(
+    1,
+    totalDurationSec || clips.reduce((acc, c) => acc + Math.max(0.5, c.durationSec), 0)
+  );
+  const cleanTexts = clips.map((c) => sanitizeSpokenNarration(c.subtitleText || ''));
+  const sceneWordArrays = cleanTexts.map((t) => t.split(/\s+/).filter(Boolean));
+  const flatWords = sceneWordArrays.flat();
+
+  const hasWhisper = Boolean(options?.whisperWords && options.whisperWords.length >= 2);
+  const hasSpeechIntervals = Boolean(options?.speechIntervals && options.speechIntervals.length > 0);
+  const geminiHints = options?.geminiSceneTimings || [];
+  const hintByScene = new Map(geminiHints.map((h) => [h.sceneNumber, h]));
+
+  if (flatWords.length === 0) {
+    return {
+      clips: calibrateClipDurations(clips, safeTotal),
+      wordTimingsByScene: clips.map(() => []),
+      hasRealAudioSync: false,
+    };
+  }
+
+  let flatAligned: WordTimestamp[] = [];
+  let hasRealAudioSync = false;
+
+  if (hasWhisper) {
+    flatAligned = alignFullScriptWordsGlobally({
+      scriptWords: flatWords,
+      totalDurationSec: safeTotal,
+      whisperWords: options?.whisperWords,
+      speechIntervals: options?.speechIntervals,
+    });
+    hasRealAudioSync = true;
+  } else if (
+    geminiHints.length > 0 &&
+    clips.every((c, idx) => sceneWordArrays[idx].length === 0 || hintByScene.has(c.sceneNumber))
+  ) {
+    const intervals = options?.speechIntervals || [];
+    for (let i = 0; i < clips.length; i++) {
+      const words = sceneWordArrays[i];
+      if (words.length === 0) continue;
+      const hint = hintByScene.get(clips[i].sceneNumber)!;
+      const clippedIntervals = intervals
+        .map((iv) => ({
+          startSec: Math.max(hint.startSec, iv.startSec),
+          endSec: Math.min(hint.endSec, iv.endSec),
+        }))
+        .filter((iv) => iv.endSec > iv.startSec + 0.05);
+      const sceneWords = distributeWordsAcrossSpeechIntervals(
+        words,
+        clippedIntervals,
+        hint.startSec,
+        hint.endSec
+      );
+      flatAligned.push(...sceneWords);
+    }
+    hasRealAudioSync = true;
+  } else if (hasSpeechIntervals) {
+    flatAligned = alignFullScriptWordsGlobally({
+      scriptWords: flatWords,
+      totalDurationSec: safeTotal,
+      speechIntervals: options?.speechIntervals,
+    });
+    hasRealAudioSync = true;
+  }
+
+  if (hasRealAudioSync && flatAligned.length === flatWords.length) {
+    const wordTimingsByScene: WordTimestamp[][] = [];
+    let offset = 0;
+    for (const words of sceneWordArrays) {
+      wordTimingsByScene.push(flatAligned.slice(offset, offset + words.length));
+      offset += words.length;
     }
 
-    const totalChars = chunks.reduce((acc, c) => acc + Math.max(1, c.length), 0);
-    for (const chunk of chunks) {
-      const sliceSec = (Math.max(1, chunk.length) / totalChars) * clip.durationSec;
-      const start = cursorSec;
-      const end = cursorSec + Math.max(0.35, sliceSec - 0.03);
-      entries.push(`${index}\n${formatSrtTime(start)} --> ${formatSrtTime(end)}\n${chunk}\n`);
-      cursorSec += sliceSec;
+    // Derive scene visual cut boundaries directly from aligned word starts
+    const nonEmptyIndices = wordTimingsByScene
+      .map((arr, idx) => (arr.length > 0 ? idx : -1))
+      .filter((idx) => idx >= 0);
+
+    if (nonEmptyIndices.length > 0) {
+      // Build strictly monotonic exact scene start boundaries directly from aligned word starts
+      // with ZERO proportional rescaling, so visual cuts land on the exact spoken word timestamp.
+      const minGap = Math.min(0.25, safeTotal / Math.max(2, clips.length * 2));
+      const sceneStarts = new Array<number>(clips.length + 1).fill(-1);
+      sceneStarts[0] = 0;
+      sceneStarts[clips.length] = safeTotal;
+
+      for (let k = 1; k < nonEmptyIndices.length; k++) {
+        const idx = nonEmptyIndices[k];
+        const rawStart = wordTimingsByScene[idx][0].startSec;
+        const maxRemainingScenes = clips.length - idx;
+        const upperBound = Math.max(0, safeTotal - maxRemainingScenes * minGap);
+        sceneStarts[idx] = Math.max(minGap, Math.min(upperBound, rawStart));
+      }
+
+      // Fill any rare empty-subtitle scenes cleanly between neighboring anchored boundaries
+      let prevAnchor = 0;
+      for (let i = 1; i <= clips.length; i++) {
+        if (sceneStarts[i] >= 0) {
+          const span = i - prevAnchor;
+          if (span > 1) {
+            const startVal = sceneStarts[prevAnchor];
+            const endVal = Math.max(startVal + span * minGap, sceneStarts[i]);
+            for (let m = prevAnchor + 1; m < i; m++) {
+              sceneStarts[m] = startVal + ((endVal - startVal) * (m - prevAnchor)) / span;
+            }
+          }
+          prevAnchor = i;
+        }
+      }
+
+      // Enforce strict monotonicity without altering well-spaced spoken anchors
+      for (let i = 1; i < clips.length; i++) {
+        const lower = sceneStarts[i - 1] + minGap;
+        const upper = safeTotal - (clips.length - i) * minGap;
+        sceneStarts[i] = Math.min(upper, Math.max(lower, sceneStarts[i]));
+      }
+
+      const calibratedClips = clips.map((clip, idx) => ({
+        ...clip,
+        durationSec: Math.max(minGap, sceneStarts[idx + 1] - sceneStarts[idx]),
+      }));
+      return {
+        clips: calibratedClips,
+        wordTimingsByScene,
+        hasRealAudioSync: true,
+      };
+    }
+  }
+
+  // Pure proportional fallback (no Whisper/Gemini/silence metadata supplied)
+  const scaled = calibrateClipDurations(clips, safeTotal);
+  const wordTimingsByScene: WordTimestamp[][] = [];
+  let cursorSec = 0;
+  for (let i = 0; i < scaled.length; i++) {
+    const words = sceneWordArrays[i];
+    const dur = scaled[i].durationSec;
+    if (words.length === 0) {
+      wordTimingsByScene.push([]);
+      cursorSec += dur;
+      continue;
+    }
+    const totalChars = words.reduce((acc, w) => acc + Math.max(2, w.length), 0);
+    let innerCursor = cursorSec;
+    const mapped = words.map((word, wi) => {
+      const slice = (Math.max(2, word.length) / totalChars) * dur;
+      const s = innerCursor;
+      const e = wi === words.length - 1 ? cursorSec + dur : innerCursor + slice;
+      innerCursor += slice;
+      return { word, startSec: s, endSec: Math.max(s + 0.08, e) };
+    });
+    wordTimingsByScene.push(mapped);
+    cursorSec += dur;
+  }
+
+  return {
+    clips: scaled,
+    wordTimingsByScene,
+    hasRealAudioSync: false,
+  };
+}
+
+/**
+ * Generates synchronized phrase-level SRT subtitles from audio-aligned word timings.
+ */
+export function buildSynchronizedSrt(
+  clips: TimelineSceneClip[],
+  options?: {
+    totalDurationSec?: number;
+    whisperWords?: WordTimestamp[];
+    speechIntervals?: AudioSpeechInterval[];
+    geminiSceneTimings?: SceneTimingHint[];
+  }
+): string {
+  const totalDur =
+    options?.totalDurationSec ??
+    clips.reduce((acc, c) => acc + Math.max(0.5, c.durationSec), 0);
+  const aligned = buildUnifiedAlignedTimeline(clips, totalDur, options);
+
+  const entries: string[] = [];
+  let index = 1;
+
+  for (let sceneIdx = 0; sceneIdx < aligned.clips.length; sceneIdx++) {
+    const cleanSubtitle = sanitizeSpokenNarration(aligned.clips[sceneIdx].subtitleText || '');
+    const chunks = splitCaptionChunks(cleanSubtitle, 5);
+    const sceneWords = aligned.wordTimingsByScene[sceneIdx] || [];
+    if (chunks.length === 0 || sceneWords.length === 0) continue;
+
+    let wordCursor = 0;
+    for (let ci = 0; ci < chunks.length; ci++) {
+      const chunkWordsCount = chunks[ci].split(/\s+/).filter(Boolean).length;
+      const sliceWords = sceneWords.slice(wordCursor, wordCursor + chunkWordsCount);
+      wordCursor += chunkWordsCount;
+      if (sliceWords.length === 0) continue;
+
+      const start = sliceWords[0].startSec;
+      const rawEnd = sliceWords[sliceWords.length - 1].endSec;
+      const end = Math.max(start + 0.25, rawEnd);
+      entries.push(`${index}\n${formatSrtTime(start)} --> ${formatSrtTime(end)}\n${chunks[ci]}\n`);
       index++;
     }
   }
@@ -351,7 +556,10 @@ export function buildSynchronizedAss(
   height: number,
   style: SubtitleStyleConfig,
   options?: {
+    totalDurationSec?: number;
     whisperWords?: WordTimestamp[];
+    speechIntervals?: AudioSpeechInterval[];
+    geminiSceneTimings?: SceneTimingHint[];
     hookBannerText?: string | null;
   }
 ): string {
@@ -428,61 +636,66 @@ export function buildSynchronizedAss(
     );
   }
 
-  const whisperWords = options?.whisperWords || [];
-  let cursorSec = 0;
+  const totalDur =
+    options?.totalDurationSec ??
+    clips.reduce((acc, c) => acc + Math.max(0.5, c.durationSec), 0);
+  const aligned = buildUnifiedAlignedTimeline(clips, totalDur, {
+    whisperWords: options?.whisperWords,
+    speechIntervals: options?.speechIntervals,
+    geminiSceneTimings: options?.geminiSceneTimings,
+  });
+
   let globalWordIdx = 0;
 
-  for (const clip of clips) {
-    const cleanSubtitle = sanitizeSpokenNarration(clip.subtitleText || '');
+  for (let sceneIdx = 0; sceneIdx < aligned.clips.length; sceneIdx++) {
+    const cleanSubtitle = sanitizeSpokenNarration(aligned.clips[sceneIdx].subtitleText || '');
     const chunks = splitCaptionChunks(cleanSubtitle, maxWords);
-    if (chunks.length === 0) {
-      cursorSec += clip.durationSec;
-      continue;
-    }
+    const sceneWordTimings = aligned.wordTimingsByScene[sceneIdx] || [];
+    if (chunks.length === 0 || sceneWordTimings.length === 0) continue;
 
-    const totalChars = chunks.reduce((acc, c) => acc + Math.max(1, c.length), 0);
-    for (const chunk of chunks) {
-      const sliceSec = (Math.max(1, chunk.length) / totalChars) * clip.durationSec;
-      const chunkWords = chunk
-        .split(/\s+/)
-        .map((w) => sanitizeAssWord(w, resolved.uppercaseLatin))
-        .filter(Boolean);
+    let wordOffset = 0;
+    for (let ci = 0; ci < chunks.length; ci++) {
+      const rawChunkWords = chunks[ci].split(/\s+/).filter(Boolean);
+      const alignedChunkSlice = sceneWordTimings.slice(wordOffset, wordOffset + rawChunkWords.length);
+      wordOffset += rawChunkWords.length;
 
-      if (chunkWords.length === 0) {
-        cursorSec += sliceSec;
-        continue;
+      const chunkWords: string[] = [];
+      const chunkTimings: WordTimestamp[] = [];
+      for (let wi = 0; wi < rawChunkWords.length; wi++) {
+        const sanitized = sanitizeAssWord(rawChunkWords[wi], resolved.uppercaseLatin);
+        if (!sanitized) continue;
+        chunkWords.push(sanitized);
+        if (alignedChunkSlice[wi]) {
+          chunkTimings.push(alignedChunkSlice[wi]);
+        }
       }
 
+      if (chunkWords.length === 0 || chunkTimings.length === 0) continue;
+
+      const chunkStart = chunkTimings[0].startSec;
+      const chunkEnd = Math.max(chunkStart + 0.24, chunkTimings[chunkTimings.length - 1].endSec);
+
       if (!resolved.dynamicWordHighlight || chunkWords.length === 1) {
-        const start = cursorSec;
-        const end = cursorSec + Math.max(0.28, sliceSec - 0.02);
         const textOut =
           resolved.dynamicWordHighlight && chunkWords.length === 1
             ? `{\\c${highlightAssList[globalWordIdx % highlightAssList.length]}&\\fscx${resolved.wordPopScale}\\fscy${resolved.wordPopScale}}${chunkWords[0]}{\\r}`
             : chunkWords.join(' ');
         dialogueLines.push(
-          `Dialogue: 0,${formatAssTime(start)},${formatAssTime(end)},Default,,0,0,0,,${textOut}`
+          `Dialogue: 0,${formatAssTime(chunkStart)},${formatAssTime(chunkEnd)},Default,,0,0,0,,${textOut}`
         );
         globalWordIdx += chunkWords.length;
-        cursorSec += sliceSec;
         continue;
       }
 
-      // Word-by-word active color highlight locked to Whisper voice timestamps when available
-      const alignedTimings = mapScriptWordsToWhisperTimings(
-        chunkWords,
-        whisperWords,
-        cursorSec,
-        cursorSec + sliceSec
-      );
-
       for (let wi = 0; wi < chunkWords.length; wi++) {
-        const timing = alignedTimings[wi];
+        const timing = chunkTimings[Math.min(wi, chunkTimings.length - 1)];
         const wStart = timing.startSec;
+        const nextTiming = wi + 1 < chunkWords.length ? chunkTimings[Math.min(wi + 1, chunkTimings.length - 1)] : null;
         const wEnd =
-          wi === chunkWords.length - 1
-            ? Math.max(wStart + 0.14, cursorSec + sliceSec - 0.02)
-            : timing.endSec;
+          nextTiming && nextTiming.startSec > wStart + 0.05
+            ? nextTiming.startSec
+            : Math.max(wStart + 0.1, timing.endSec);
+
         const hlColor = highlightAssList[(globalWordIdx + wi) % highlightAssList.length];
         const popTag =
           resolved.wordPopScale > 100
@@ -499,7 +712,6 @@ export function buildSynchronizedAss(
       }
 
       globalWordIdx += chunkWords.length;
-      cursorSec += sliceSec;
     }
   }
 
@@ -573,32 +785,52 @@ export async function renderVideoWithFfmpeg(
   const gradeFilter = buildColorGradeFilter(colorGrade);
 
   const targetTotal = Math.max(req.totalNarrationDurationSec, 5);
-  const scaledClips = calibrateClipDurations(req.clips, targetTotal);
+  const alignOpts = {
+    totalDurationSec: targetTotal,
+    whisperWords: req.whisperWords,
+    speechIntervals: req.speechIntervals,
+    geminiSceneTimings: req.geminiSceneTimings,
+    hookBannerText: req.hookBannerText,
+  };
+  const unified = buildUnifiedAlignedTimeline(req.clips, targetTotal, alignOpts);
+  const scaledClips = unified.clips;
 
-  // 1. Write synchronized SRT (for export) and resolution-accurate ASS (with Whisper word sync + Hook Banner)
+  // 1. Write synchronized SRT (for export) and resolution-accurate ASS (globally locked to real audio timestamps)
   const srtPath = resolveConfinedPath(req.workDir, 'subtitles.srt');
   const assPath = resolveConfinedPath(req.workDir, 'subtitles.ass');
-  const srtContent = buildSynchronizedSrt(scaledClips);
-  const assContent = buildSynchronizedAss(scaledClips, width, height, req.subtitleStyle, {
-    whisperWords: req.whisperWords,
-    hookBannerText: req.hookBannerText,
-  });
+  const srtContent = buildSynchronizedSrt(scaledClips, alignOpts);
+  const assContent = buildSynchronizedAss(scaledClips, width, height, req.subtitleStyle, alignOpts);
   await Promise.all([
     fs.writeFile(srtPath, srtContent, 'utf8'),
     fs.writeFile(assPath, assContent, 'utf8'),
   ]);
 
-  // 2. Normalize every scene clip with energetic dynamic camera motion, cinematic color grade, and zero sluggish black dips
+  // 2. Normalize every scene clip with cumulative frame-exact boundaries (zero rounding drift across scenes)
   const normalizedPaths: string[] = [];
   const sceneCutOffsetsSec: number[] = [];
   let timelineCursor = 0;
+  let renderedFrames = 0;
+  const totalTargetFrames = Math.max(scaledClips.length, Math.round(targetTotal * fps));
 
   for (let idx = 0; idx < scaledClips.length; idx++) {
     const clip = scaledClips[idx];
     if (idx > 0) {
-      sceneCutOffsetsSec.push(timelineCursor);
+      sceneCutOffsetsSec.push(renderedFrames / fps);
     }
     timelineCursor += clip.durationSec;
+
+    const remainingClipsAfter = scaledClips.length - 1 - idx;
+    const desiredEndFrame =
+      idx === scaledClips.length - 1
+        ? totalTargetFrames
+        : Math.round(timelineCursor * fps);
+    const targetEndFrame = Math.max(
+      renderedFrames + 1,
+      Math.min(totalTargetFrames - remainingClipsAfter, desiredEndFrame)
+    );
+    const clipFrames = Math.max(1, targetEndFrame - renderedFrames);
+    const exactClipDurationSec = clipFrames / fps;
+    renderedFrames = targetEndFrame;
 
     const outSegment = resolveConfinedPath(
       req.workDir,
@@ -609,10 +841,10 @@ export async function renderVideoWithFfmpeg(
     const useSubtleWhiteFlash =
       pace === 'viral_fast' && idx > 0 && (transitionLower === 'flash' || idx % 3 === 0);
     const useCinematicFade = pace === 'cinematic';
-    const fadeDur = useCinematicFade ? Math.min(0.18, clip.durationSec * 0.1) : 0;
+    const fadeDur = useCinematicFade ? Math.min(0.18, exactClipDurationSec * 0.1) : 0;
 
     if (clip.mediaType === 'image') {
-      const frames = Math.max(fps, Math.round(clip.durationSec * fps));
+      const frames = clipFrames;
       // Keep zoompan source frame close to output size to stay well under 512 MB RAM
       const zpW = Math.ceil((width * 1.18) / 2) * 2;
       const zpH = Math.ceil((height * 1.18) / 2) * 2;
@@ -635,7 +867,7 @@ export async function renderVideoWithFfmpeg(
       if (useSubtleWhiteFlash) {
         filters.push('fade=t=in:st=0:d=0.07:color=white@0.45');
       } else if (useCinematicFade && fadeDur > 0.04) {
-        const fadeOutStart = Math.max(0, clip.durationSec - fadeDur);
+        const fadeOutStart = Math.max(0, exactClipDurationSec - fadeDur);
         filters.push(`fade=t=in:st=0:d=${fadeDur.toFixed(2)}`, `fade=t=out:st=${fadeOutStart.toFixed(2)}:d=${fadeDur.toFixed(2)}`);
       }
       filters.push('format=yuv420p');
@@ -647,8 +879,8 @@ export async function renderVideoWithFfmpeg(
         '1',
         '-i',
         clip.localMediaPath,
-        '-t',
-        clip.durationSec.toFixed(2),
+        '-frames:v',
+        String(clipFrames),
         '-vf',
         filters.join(','),
         '-c:v',
@@ -658,13 +890,15 @@ export async function renderVideoWithFfmpeg(
         '-crf',
         lowMem ? '23' : '21',
         ...x264MemParams,
+        '-video_track_timescale',
+        '90000',
         '-max_muxing_queue_size',
         '256',
         '-an',
         outSegment,
       ]);
     } else {
-      const durSafe = Math.max(0.5, clip.durationSec).toFixed(2);
+      const durSafe = Math.max(0.25, exactClipDurationSec).toFixed(3);
       // Dynamic punch-zoom motion on video clips as well so static shots feel high-energy
       const zoomDelta = pace === 'viral_fast' ? 0.08 : 0.05;
       const zoomScaleExpr =
@@ -676,6 +910,7 @@ export async function renderVideoWithFfmpeg(
         `scale=${width}:${height}:force_original_aspect_ratio=increase`,
         `crop=${width}:${height}`,
         `fps=${fps}`,
+        'setpts=PTS-STARTPTS',
         `scale=w='trunc(${width}*(${zoomScaleExpr})/2)*2':h='trunc(${height}*(${zoomScaleExpr})/2)*2':eval=frame`,
         `crop=${width}:${height}:'(iw-ow)/2':'(ih-oh)/2'`,
         gradeFilter,
@@ -683,7 +918,7 @@ export async function renderVideoWithFfmpeg(
       if (useSubtleWhiteFlash) {
         filters.push('fade=t=in:st=0:d=0.07:color=white@0.45');
       } else if (useCinematicFade && fadeDur > 0.04) {
-        const fadeOutStart = Math.max(0, clip.durationSec - fadeDur);
+        const fadeOutStart = Math.max(0, exactClipDurationSec - fadeDur);
         filters.push(`fade=t=in:st=0:d=${fadeDur.toFixed(2)}`, `fade=t=out:st=${fadeOutStart.toFixed(2)}:d=${fadeDur.toFixed(2)}`);
       }
       filters.push('format=yuv420p');
@@ -695,8 +930,8 @@ export async function renderVideoWithFfmpeg(
         '-1',
         '-i',
         clip.localMediaPath,
-        '-t',
-        clip.durationSec.toFixed(2),
+        '-frames:v',
+        String(clipFrames),
         '-vf',
         filters.join(','),
         '-c:v',
@@ -706,6 +941,8 @@ export async function renderVideoWithFfmpeg(
         '-crf',
         lowMem ? '23' : '21',
         ...x264MemParams,
+        '-video_track_timescale',
+        '90000',
         '-max_muxing_queue_size',
         '256',
         '-an',
@@ -754,18 +991,25 @@ export async function renderVideoWithFfmpeg(
   let boomInputIdx: number | null = null;
   let whooshInputIdx: number | null = null;
 
-  const hasMusic = Boolean(req.backgroundMusicPath);
-  if (hasMusic && req.backgroundMusicPath) {
+  const hasValidMusic = req.backgroundMusicPath
+    ? await probeHasAudioStream(req.backgroundMusicPath)
+    : false;
+  if (hasValidMusic && req.backgroundMusicPath) {
     ffmpegArgs.push('-stream_loop', '-1', '-i', req.backgroundMusicPath);
     musicInputIdx = nextInputIdx++;
   }
 
   const sfxActive = req.sfxEnabled !== false;
-  if (sfxActive && req.hookBoomPath) {
+  if (sfxActive && req.hookBoomPath && (await probeHasAudioStream(req.hookBoomPath))) {
     ffmpegArgs.push('-i', req.hookBoomPath);
     boomInputIdx = nextInputIdx++;
   }
-  if (sfxActive && req.whooshPath && sceneCutOffsetsSec.length > 0) {
+  if (
+    sfxActive &&
+    req.whooshPath &&
+    sceneCutOffsetsSec.length > 0 &&
+    (await probeHasAudioStream(req.whooshPath))
+  ) {
     ffmpegArgs.push('-i', req.whooshPath);
     whooshInputIdx = nextInputIdx++;
   }
@@ -783,24 +1027,31 @@ export async function renderVideoWithFfmpeg(
     videoMap = '[vout]';
   }
 
+  const audioFmt = 'aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo';
   const narVol = req.narrationVolume ?? 1.05;
+  const useDucking = musicInputIdx !== null && req.duckingEnabled !== false;
   const audioLayers: string[] = ['[nar]'];
-  filterParts.push(`[1:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=${narVol},dynaudnorm=f=150:g=15[nar]`);
+  // FFmpeg filtergraph pads can only be consumed once: split [nar] and re-pin fltp/stereo before sidechaincompress!
+  filterParts.push(
+    useDucking
+      ? `[1:a]${audioFmt},volume=${narVol},dynaudnorm=f=150:g=15,asplit=2[nar][nar_pre];[nar_pre]${audioFmt}[nar_sc]`
+      : `[1:a]${audioFmt},volume=${narVol},dynaudnorm=f=150:g=15[nar]`
+  );
 
   if (musicInputIdx !== null) {
     const musVol = req.musicVolume ?? 0.16;
     const fadeOutStart = Math.max(0, targetTotal - 2);
-    if (req.duckingEnabled !== false) {
+    if (useDucking) {
       filterParts.push(
-        `[${musicInputIdx}:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=${musVol},afade=t=in:st=0:d=1.2,afade=t=out:st=${fadeOutStart.toFixed(
+        `[${musicInputIdx}:a]${audioFmt},volume=${musVol},afade=t=in:st=0:d=1.2,afade=t=out:st=${fadeOutStart.toFixed(
           2
         )}:d=2[mus]`,
-        `[mus][nar]sidechaincompress=threshold=0.025:ratio=6:attack=20:release=240[ducked]`
+        `[mus][nar_sc]sidechaincompress=threshold=0.025:ratio=6:attack=20:release=240[ducked]`
       );
       audioLayers.push('[ducked]');
     } else {
       filterParts.push(
-        `[${musicInputIdx}:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=${musVol},afade=t=in:st=0:d=1.2,afade=t=out:st=${fadeOutStart.toFixed(
+        `[${musicInputIdx}:a]${audioFmt},volume=${musVol},afade=t=in:st=0:d=1.2,afade=t=out:st=${fadeOutStart.toFixed(
           2
         )}:d=2[mus]`
       );
@@ -809,7 +1060,7 @@ export async function renderVideoWithFfmpeg(
   }
 
   if (boomInputIdx !== null) {
-    filterParts.push(`[${boomInputIdx}:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=0.22[boom]`);
+    filterParts.push(`[${boomInputIdx}:a]${audioFmt},volume=0.22[boom]`);
     audioLayers.push('[boom]');
   }
 
@@ -820,12 +1071,12 @@ export async function renderVideoWithFfmpeg(
     if (chosenCuts.length === 1) {
       const delayMs = Math.max(0, Math.round((chosenCuts[0] - 0.08) * 1000));
       filterParts.push(
-        `[${whooshInputIdx}:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=0.20,adelay=${delayMs}|${delayMs}[w0]`
+        `[${whooshInputIdx}:a]${audioFmt},volume=0.20,adelay=${delayMs}|${delayMs}[w0]`
       );
       audioLayers.push('[w0]');
     } else if (chosenCuts.length > 1) {
       const splitLabels = chosenCuts.map((_, idx) => `[ws${idx}]`).join('');
-      filterParts.push(`[${whooshInputIdx}:a]aformat=sample_rates=44100:channel_layouts=stereo,asplit=${chosenCuts.length}${splitLabels}`);
+      filterParts.push(`[${whooshInputIdx}:a]${audioFmt},asplit=${chosenCuts.length}${splitLabels}`);
       chosenCuts.forEach((sec, idx) => {
         const delayMs = Math.max(0, Math.round((sec - 0.08) * 1000));
         filterParts.push(`[ws${idx}]volume=0.18,adelay=${delayMs}|${delayMs}[w${idx}]`);
@@ -1013,6 +1264,30 @@ export async function verifyRenderedMp4(filePath: string): Promise<number> {
   return duration;
 }
 
+async function probeHasAudioStream(filePath: string): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync(
+      config.ffprobePath,
+      [
+        '-v',
+        'error',
+        '-select_streams',
+        'a',
+        '-show_entries',
+        'stream=codec_type',
+        '-of',
+        'json',
+        filePath,
+      ],
+      { timeout: 8000 }
+    );
+    const parsed = JSON.parse(stdout) as { streams?: Array<{ codec_type?: string }> };
+    return Boolean(parsed.streams && parsed.streams.length > 0);
+  } catch {
+    return false;
+  }
+}
+
 async function runFfmpeg(args: string[]): Promise<void> {
   try {
     await execFileAsync(config.ffmpegPath, args, {
@@ -1021,7 +1296,13 @@ async function runFfmpeg(args: string[]): Promise<void> {
     });
   } catch (err: unknown) {
     const stderr = (err as { stderr?: string })?.stderr || '';
-    const snippet = stderr.slice(-400) || (err instanceof Error ? err.message : 'FFmpeg error');
+    const errorLines = stderr
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => /matches no streams|error|invalid|no such|conversion failed|unable to/i.test(l));
+    const snippet =
+      (errorLines.length > 0 ? errorLines.slice(-3).join(' | ') : stderr.slice(-480)).slice(-480) ||
+      (err instanceof Error ? err.message : 'FFmpeg error');
     throw new Error(`FFmpeg render failed: ${snippet}`);
   }
 }

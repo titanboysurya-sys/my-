@@ -15,6 +15,7 @@ import {
   generateScriptWithAI,
   resolveLanguageMeta,
   targetWordRangeForDuration,
+  verifySceneVisualMatchesWithAI,
   type AIProviderClient,
 } from '../src/services/aiProvider.js';
 import {
@@ -37,14 +38,21 @@ import {
   STUDIO_VOICE_CATALOG,
   wrapPcm16AsWav,
 } from '../src/services/voiceService.js';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import {
   buildColorGradeFilter,
   buildSynchronizedAss,
   buildSynchronizedSrt,
+  buildUnifiedAlignedTimeline,
   calibrateClipDurations,
   normalizeColorGrade,
   normalizeEditingPace,
   normalizeSubtitlePreset,
+  renderVideoWithFfmpeg,
   resolveOutputDimensions,
 } from '../src/services/ffmpegRenderer.js';
 import {
@@ -56,17 +64,30 @@ import {
   parseDelimitedScriptSections,
   sanitizeSpokenNarration,
 } from '../src/services/narrationSanitizer.js';
-import { autoBgmMoodForNiche, normalizeBgmMood } from '../src/services/soundDesignService.js';
-import { mapScriptWordsToWhisperTimings } from '../src/services/whisperAlignService.js';
+import {
+  autoBgmMoodForNiche,
+  generateProceduralBgmTrack,
+  generateTransitionSfxAssets,
+  normalizeBgmMood,
+} from '../src/services/soundDesignService.js';
+import {
+  alignFullScriptWordsGlobally,
+  distributeWordsAcrossSpeechIntervals,
+  mapScriptWordsToWhisperTimings,
+  parseSilenceDetectIntervals,
+} from '../src/services/whisperAlignService.js';
 import {
   computeRetryBackoffSeconds,
   isPermanentError,
+  reconcileClipsSubtitleCoverage,
   shouldSkipStage,
 } from '../src/services/pipelineExecutor.js';
 import {
   buildScheduleSlotIdempotencyKey,
   computeNextScheduledSlotIso,
 } from '../src/scheduler.js';
+
+const execFileAsync = promisify(execFile);
 
 const TEST_ENC_KEY = crypto.randomBytes(32).toString('hex');
 
@@ -762,3 +783,382 @@ test('Lexica AI, Civitai AI, Openverse, and AI Horde CDN hosts pass media SSRF g
     globalThis.fetch = originalFetch;
   }
 });
+
+test('Global Whisper DP alignment locks ASS & SRT captions to real voiceover timing even under severe pace skew', () => {
+  // Simulate severe 8+ second pacing skew:
+  // Scene 1 has 10 words spoken rapidly in 0.2s - 2.0s; Scene 2 starts at 2.3s; Scene 3 starts at 11.5s
+  const clips = [
+    {
+      sceneNumber: 1,
+      localMediaPath: '/tmp/1.jpg',
+      mediaType: 'image' as const,
+      durationSec: 12,
+      subtitleText: 'One fast opening sentence spoken super quickly in two seconds',
+      transition: 'punch',
+    },
+    {
+      sceneNumber: 2,
+      localMediaPath: '/tmp/2.jpg',
+      mediaType: 'image' as const,
+      durationSec: 4,
+      subtitleText: 'Slow dramatic pause arrives here',
+      transition: 'flash',
+    },
+  ];
+
+  const whisperWords = [
+    { word: 'One', startSec: 0.2, endSec: 0.35 },
+    { word: 'fast', startSec: 0.36, endSec: 0.55 },
+    { word: 'opening', startSec: 0.56, endSec: 0.8 },
+    { word: 'sentence', startSec: 0.82, endSec: 1.05 },
+    { word: 'spoken', startSec: 1.06, endSec: 1.25 },
+    { word: 'super', startSec: 1.26, endSec: 1.45 },
+    { word: 'quickly', startSec: 1.46, endSec: 1.65 },
+    { word: 'in', startSec: 1.66, endSec: 1.75 },
+    { word: 'two', startSec: 1.76, endSec: 1.88 },
+    { word: 'seconds', startSec: 1.9, endSec: 2.1 },
+    // Huge shift: proportional estimate would put "Slow" around ~10.0s, but Whisper puts it at 2.4s!
+    { word: 'Slow', startSec: 2.4, endSec: 4.5 },
+    { word: 'dramatic', startSec: 4.6, endSec: 7.2 },
+    { word: 'pause', startSec: 7.3, endSec: 10.5 },
+    { word: 'arrives', startSec: 10.6, endSec: 12.2 },
+    { word: 'here', startSec: 12.3, endSec: 14.0 },
+  ];
+
+  const aligned = alignFullScriptWordsGlobally({
+    scriptWords: clips.flatMap((c) => c.subtitleText.split(/\s+/)),
+    totalDurationSec: 14.5,
+    whisperWords,
+  });
+  // "Slow" is index 10 and MUST start right at 2.4s (never ~10s!)
+  assert.equal(aligned[10].word, 'Slow');
+  assert.ok(Math.abs(aligned[10].startSec - 2.4) < 0.05);
+
+  const ass = buildSynchronizedAss(
+    clips,
+    720,
+    1280,
+    {
+      enabled: true,
+      burnIn: true,
+      preset: 'mrbeast',
+      fontSize: 44,
+      primaryColor: '#FFFFFF',
+      outlineColor: '#000000',
+      position: 'bottom_safe',
+    },
+    { totalDurationSec: 14.5, whisperWords }
+  );
+  // First caption of Scene 2 ("SLOW DRAMATIC PAUSE") must appear right at 0:00:02.40!
+  assert.ok(ass.includes('Dialogue: 0,0:00:02.40,'));
+
+  const srt = buildSynchronizedSrt(clips, { totalDurationSec: 14.5, whisperWords });
+  assert.ok(srt.includes('00:00:02,400 -->'));
+});
+
+test('FFmpeg silencedetect interval parser and narration coverage reconciler prevent drift without Whisper', () => {
+  const sampleStderr = [
+    '[silencedetect @ 0x1] silence_start: 0',
+    '[silencedetect @ 0x1] silence_end: 0.80 | silence_duration: 0.80',
+    '[silencedetect @ 0x1] silence_start: 4.20',
+    '[silencedetect @ 0x1] silence_end: 5.10 | silence_duration: 0.90',
+    '[silencedetect @ 0x1] silence_start: 9.00',
+    '[silencedetect @ 0x1] silence_end: 10.00 | silence_duration: 1.00',
+  ].join('\n');
+
+  const intervals = parseSilenceDetectIntervals(sampleStderr, 10.0);
+  assert.equal(intervals.length, 2);
+  assert.ok(Math.abs(intervals[0].startSec - 0.8) < 0.01);
+  assert.ok(Math.abs(intervals[0].endSec - 4.2) < 0.01);
+  assert.ok(Math.abs(intervals[1].startSec - 5.1) < 0.01);
+  assert.ok(Math.abs(intervals[1].endSec - 9.0) < 0.01);
+
+  const distributed = distributeWordsAcrossSpeechIntervals(
+    ['First', 'burst', 'second', 'burst'],
+    intervals
+  );
+  assert.ok(distributed[0].startSec >= 0.8);
+  assert.ok(distributed[3].endSec <= 9.01);
+
+  // Reconciler restores spoken words when a scene is missing subtitle text
+  const reconciled = reconcileClipsSubtitleCoverage(
+    [
+      {
+        sceneNumber: 1,
+        localMediaPath: '/tmp/1.jpg',
+        mediaType: 'image',
+        durationSec: 3,
+        subtitleText: 'One',
+        transition: 'cut',
+      },
+      {
+        sceneNumber: 2,
+        localMediaPath: '/tmp/2.jpg',
+        mediaType: 'image',
+        durationSec: 3,
+        subtitleText: '',
+        transition: 'cut',
+      },
+    ],
+    'One two three four five six'
+  );
+  assert.ok(reconciled[1].subtitleText.includes('six'));
+});
+
+test('renderVideoWithFfmpeg succeeds end-to-end with ducked BGM, hook boom, and multi-cut whoosh asplit mix', async () => {
+  const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autotube_fftest_'));
+  try {
+    const imgPath = path.join(workDir, 'img.jpg');
+    const narPath = path.join(workDir, 'nar.wav');
+    await execFileAsync('ffmpeg', [
+      '-y',
+      '-f',
+      'lavfi',
+      '-i',
+      'color=c=navy:s=360x640:d=1',
+      '-frames:v',
+      '1',
+      imgPath,
+    ]);
+    await execFileAsync('ffmpeg', [
+      '-y',
+      '-f',
+      'lavfi',
+      '-i',
+      'sine=frequency=330:duration=6',
+      '-ac',
+      '1',
+      '-ar',
+      '24000',
+      narPath,
+    ]);
+
+    const bgmPath = await generateProceduralBgmTrack({
+      workDir,
+      mood: 'cinematic',
+      durationSec: 12,
+    });
+    const sfx = await generateTransitionSfxAssets(workDir);
+
+    const out = await renderVideoWithFfmpeg({
+      workDir,
+      clips: [
+        {
+          sceneNumber: 1,
+          localMediaPath: imgPath,
+          mediaType: 'image',
+          durationSec: 2,
+          subtitleText: 'First cartoon scene hook',
+          transition: 'punch',
+        },
+        {
+          sceneNumber: 2,
+          localMediaPath: imgPath,
+          mediaType: 'image',
+          durationSec: 2,
+          subtitleText: 'Second cartoon scene twist',
+          transition: 'flash',
+        },
+        {
+          sceneNumber: 3,
+          localMediaPath: imgPath,
+          mediaType: 'image',
+          durationSec: 2,
+          subtitleText: 'Third cartoon scene finale',
+          transition: 'cut',
+        },
+      ],
+      narrationAudioPath: narPath,
+      totalNarrationDurationSec: 6,
+      format: '9:16',
+      qualityPreset: '720p',
+      subtitleStyle: {
+        enabled: true,
+        burnIn: true,
+        preset: 'mrbeast',
+        fontSize: 44,
+        primaryColor: '#FFFFFF',
+        outlineColor: '#000000',
+        position: 'bottom_safe',
+      },
+      editingPace: 'viral_fast',
+      colorGrade: 'vibrant',
+      hookBannerText: 'Auto Cartoon Video',
+      backgroundMusicPath: bgmPath,
+      duckingEnabled: true,
+      sfxEnabled: true,
+      hookBoomPath: sfx.hookBoomPath,
+      whooshPath: sfx.whooshPath,
+    });
+
+    assert.ok(out.fileSizeBytes > 10_000);
+    assert.ok(out.durationSec >= 5.5 && out.durationSec <= 6.5);
+  } finally {
+    await fs.rm(workDir, { recursive: true, force: true });
+  }
+});
+
+test('Zero-overlap HD portrait stock clips are strictly rejected while stemmed literal subject matches score high', () => {
+  const genericFiller: MediaCandidate = {
+    provider: 'pexels',
+    externalId: 'pexels-dust-999',
+    mediaType: 'video',
+    originalUrl: 'https://pexels.com/video/dark-dust-particles-background',
+    downloadUrl: 'https://videos.pexels.com/dust.mp4',
+    width: 1080,
+    height: 1920,
+    durationSec: 8,
+    titleOrTags: 'dark man walking stairs abstract dust particles slow motion',
+    authorName: 'Stock',
+    licenseMetadata: {},
+  };
+
+  const literalMatch: MediaCandidate = {
+    provider: 'wikimedia',
+    externalId: 'wiki-chip-101',
+    mediaType: 'image',
+    originalUrl: 'https://commons.wikimedia.org/wiki/File:Nvidia_silicon_wafer.jpg',
+    downloadUrl: 'https://upload.wikimedia.org/nvidia_chip.jpg',
+    width: 1080,
+    height: 1920,
+    durationSec: 0,
+    titleOrTags: 'nvidia microchip silicon wafers processor semiconductor factory',
+    authorName: 'Wikimedia',
+    licenseMetadata: {},
+  };
+
+  const fillerScore = scoreMediaCandidate(genericFiller, {
+    keywords: ['nvidia microchips', 'silicon wafer'],
+    visualDescription: 'Close-up of Nvidia microchips on silicon wafer',
+    narration: 'Nvidia builds powerful AI microchips on silicon wafers',
+    targetDurationSec: 4,
+    format: '9:16',
+    preferredType: 'video',
+    alreadyUsed: false,
+  });
+
+  const literalScore = scoreMediaCandidate(literalMatch, {
+    keywords: ['nvidia microchips', 'silicon wafer'],
+    visualDescription: 'Close-up of Nvidia microchips on silicon wafer',
+    narration: 'Nvidia builds powerful AI microchips on silicon wafers',
+    targetDurationSec: 4,
+    format: '9:16',
+    preferredType: 'image',
+    alreadyUsed: false,
+  });
+
+  // Zero-overlap filler must NEVER exceed the 0.12 semantic gate even when 1080x1920 8s portrait video!
+  assert.ok(fillerScore <= 0.12, `Expected fillerScore <= 0.12, got ${fillerScore}`);
+  // Stemmed match ("microchips" <-> "microchip", "wafers" <-> "wafer") must score > 0.85
+  assert.ok(literalScore > 0.85, `Expected literalScore > 0.85, got ${literalScore}`);
+});
+
+test('Batch AI visual verifier picks literal narration match and emits rescue query/prompt when candidates mismatch', async () => {
+  const mockAi: AIProviderClient = {
+    name: 'gemini',
+    async generateJson<T>() {
+      return {
+        decisions: [
+          {
+            sceneNumber: 1,
+            selectedIdx: 1,
+            confidence: 92,
+          },
+          {
+            sceneNumber: 2,
+            selectedIdx: null,
+            confidence: 18,
+            refinedQuery: 'credit rating downgrade red chart',
+            imagePrompt: 'Financial analyst screen showing red credit rating downgrade chart on dark trading floor',
+          },
+        ],
+      } as T;
+    },
+  };
+
+  const decisions = await verifySceneVisualMatchesWithAI(mockAi, {
+    topic: 'Clever Fox & Market Risk',
+    niche: 'story',
+    isCartoon: true,
+    scenes: [
+      {
+        sceneNumber: 1,
+        narration: 'Ek chalaak lomdi ghane jungle mein daud rahi thi',
+        visualDescription: 'Clever red fox running through dense forest',
+        primaryKeyword: 'red fox forest',
+        candidates: [
+          { idx: 0, mediaType: 'video', provider: 'pexels', description: 'fox news television studio anchor desk', lexicalScore: 0.55 },
+          { idx: 1, mediaType: 'image', provider: 'Lexica AI', description: 'cute 3d cartoon red fox running through green forest', lexicalScore: 0.82 },
+        ],
+      },
+      {
+        sceneNumber: 2,
+        narration: 'Credit rating girne ka khatra badh raha hai',
+        visualDescription: 'Red financial chart falling credit rating warning',
+        primaryKeyword: 'credit rating fall',
+        candidates: [
+          { idx: 0, mediaType: 'video', provider: 'pexels', description: 'man walking up empty office stairs', lexicalScore: 0.2 },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(decisions.get(1)?.selectedIdx, 1);
+  assert.equal(decisions.get(1)?.confidence, 92);
+  assert.equal(decisions.get(2)?.selectedIdx, null);
+  assert.equal(decisions.get(2)?.refinedQuery, 'credit rating downgrade red chart');
+  assert.ok(decisions.get(2)?.imagePrompt?.includes('credit rating downgrade'));
+});
+
+test('buildUnifiedAlignedTimeline locks visual cut boundaries strictly to spoken word timestamps with zero rescaling drift', () => {
+  const clips = [
+    {
+      sceneNumber: 1,
+      localMediaPath: '/tmp/s1.jpg',
+      mediaType: 'image' as const,
+      durationSec: 4,
+      subtitleText: 'Alpha beta',
+      transition: 'punch',
+    },
+    {
+      sceneNumber: 2,
+      localMediaPath: '/tmp/s2.jpg',
+      mediaType: 'image' as const,
+      durationSec: 4,
+      subtitleText: 'Gamma delta epsilon',
+      transition: 'cut',
+    },
+    {
+      sceneNumber: 3,
+      localMediaPath: '/tmp/s3.jpg',
+      mediaType: 'image' as const,
+      durationSec: 4,
+      subtitleText: 'Zeta eta',
+      transition: 'flash',
+    },
+  ];
+
+  const whisperWords = [
+    { word: 'Alpha', startSec: 0.1, endSec: 0.6 },
+    { word: 'beta', startSec: 0.65, endSec: 1.2 },
+    // Scene 2 spoken start is strictly 1.50s
+    { word: 'Gamma', startSec: 1.5, endSec: 3.0 },
+    { word: 'delta', startSec: 3.1, endSec: 5.0 },
+    { word: 'epsilon', startSec: 5.1, endSec: 7.4 },
+    // Scene 3 spoken start is strictly 7.80s
+    { word: 'Zeta', startSec: 7.8, endSec: 9.0 },
+    { word: 'eta', startSec: 9.1, endSec: 10.0 },
+  ];
+
+  const unified = buildUnifiedAlignedTimeline(clips, 10.0, { whisperWords });
+  assert.equal(unified.hasRealAudioSync, true);
+
+  const cut2Start = unified.clips[0].durationSec;
+  const cut3Start = unified.clips[0].durationSec + unified.clips[1].durationSec;
+  const totalDur = unified.clips.reduce((acc, c) => acc + c.durationSec, 0);
+
+  assert.ok(Math.abs(cut2Start - 1.5) < 0.001, `Scene 2 cut must be exact 1.50s, got ${cut2Start}`);
+  assert.ok(Math.abs(cut3Start - 7.8) < 0.001, `Scene 3 cut must be exact 7.80s, got ${cut3Start}`);
+  assert.ok(Math.abs(totalDur - 10.0) < 0.001, `Total duration must equal 10.0s, got ${totalDur}`);
+});
+

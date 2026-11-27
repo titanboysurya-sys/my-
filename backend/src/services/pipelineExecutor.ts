@@ -9,13 +9,17 @@ import {
   generateScriptWithAI,
   generateSeoMetadataWithAI,
   researchTopicsWithAI,
+  verifySceneVisualMatchesWithAI,
   type GeneratedSeoMetadata,
   type ResearchReference,
 } from './aiProvider.js';
 import {
   downloadAndPersistMedia,
-  findBestMediaForScene,
+  gatherSceneMediaCandidates,
+  isCartoonOrStylizedIntent,
+  rescueUnmatchedSceneMedia,
   type MediaSourceMode,
+  type SceneMediaSearchInput,
   type ScoredMediaCandidate,
 } from './mediaSearchService.js';
 import {
@@ -34,10 +38,14 @@ import {
   generateTransitionSfxAssets,
   normalizeBgmMood,
 } from './soundDesignService.js';
-import { synthesizeNarration, type VoiceProviderName } from './voiceService.js';
+import { probeAudioDurationSeconds, synthesizeNarration, type VoiceProviderName } from './voiceService.js';
 import {
   alignNarrationWithGroqWhisper,
+  alignScenesWithGeminiAudio,
+  detectAudioSpeechIntervals,
   trimAudioDeadAir,
+  type AudioSpeechInterval,
+  type SceneTimingHint,
   type WordTimestamp,
 } from './whisperAlignService.js';
 import { uploadVideoToYouTubeResumable } from './youtubeService.js';
@@ -99,6 +107,51 @@ export function isPermanentError(message: string): boolean {
     lower.includes('revoked') ||
     lower.includes('no connected youtube channel')
   );
+}
+
+/**
+ * Ensures scene subtitleText values match the exact spoken script sent to TTS so
+ * dropped sentences or altered scene text never cause multi-second audio-subtitle skew.
+ */
+export function reconcileClipsSubtitleCoverage(
+  clips: TimelineSceneClip[],
+  spokenNarration: string
+): TimelineSceneClip[] {
+  const cleanSpoken = sanitizeSpokenNarration(spokenNarration);
+  const spokenWords = cleanSpoken.split(/\s+/).filter(Boolean);
+  if (clips.length === 0 || spokenWords.length === 0) return clips;
+
+  const sceneTexts = clips.map((c) => sanitizeSpokenNarration(c.subtitleText || ''));
+  const combinedWords = sceneTexts.join(' ').split(/\s+/).filter(Boolean);
+  const allPopulated = sceneTexts.every((t) => t.length > 0);
+  const ratio = combinedWords.length / spokenWords.length;
+
+  // Preserve LLM scene splits whenever they already match the spoken narration closely
+  if (allPopulated && ratio >= 0.85 && ratio <= 1.15) {
+    return clips;
+  }
+
+  // Re-partition the exact spoken words across scenes proportionally by their existing weights
+  const weights = clips.map((c, idx) => {
+    const w = sceneTexts[idx].split(/\s+/).filter(Boolean).length;
+    return w > 0 ? w : Math.max(1, Math.round(c.durationSec || 3));
+  });
+  const totalWeight = weights.reduce((a, b) => a + b, 0) || clips.length;
+
+  let cursor = 0;
+  return clips.map((clip, idx) => {
+    const isLast = idx === clips.length - 1;
+    const count = isLast
+      ? spokenWords.length - cursor
+      : Math.max(1, Math.round((weights[idx] / totalWeight) * spokenWords.length));
+    const end = isLast ? spokenWords.length : Math.min(spokenWords.length, cursor + count);
+    const slice = spokenWords.slice(cursor, end).join(' ');
+    cursor = end;
+    return {
+      ...clip,
+      subtitleText: slice || sceneTexts[idx] || clip.subtitleText,
+    };
+  });
 }
 
 async function recordNotification(params: {
@@ -530,6 +583,12 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
         ? uploadCfgTop.media_source_mode
         : 'all';
 
+    const scenesToVerify: Array<{
+      scene: (typeof scenes)[number];
+      searchInput: SceneMediaSearchInput;
+      candidates: ScoredMediaCandidate[];
+    }> = [];
+
     for (let i = 0; i < scenes.length; i++) {
       const scene = scenes[i];
       const rawKeywords = Array.isArray(scene.search_keywords)
@@ -571,7 +630,7 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
         }
       }
 
-      const candidate = await findBestMediaForScene({
+      const searchInput: SceneMediaSearchInput = {
         userId: job.user_id,
         projectId: project.id,
         sceneId: scene.id,
@@ -587,15 +646,94 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
         customMediaUrl: sceneCustomUrl,
         niche: project.niche,
         contentStyle: project.content_style,
+      };
+
+      const { customMatch, candidates } = await gatherSceneMediaCandidates(searchInput);
+      if (customMatch) {
+        usedExternalIds.add(customMatch.externalId);
+        pendingDownloads.push({ scene, candidate: customMatch });
+      } else {
+        scenesToVerify.push({ scene, searchInput, candidates });
+      }
+    }
+
+    if (scenesToVerify.length > 0) {
+      await updateJobStage(
+        job.id,
+        project.id,
+        'searching_media',
+        41,
+        'Verifying exact visual-to-voiceover match for every scene',
+        completedStages
+      );
+
+      const isCartoonProject = isCartoonOrStylizedIntent({
+        niche: project.niche,
+        contentStyle: project.content_style,
       });
 
-      if (!candidate) {
-        throw new Error(
-          `No relevant footage found for Scene ${scene.scene_number} ("${scene.primary_keyword}"). Try simplifying scene keywords or adding a custom open-source URL.`
-        );
+      const verificationMap = await verifySceneVisualMatchesWithAI(ai, {
+        topic: resolvedTopic,
+        niche: project.niche,
+        isCartoon: isCartoonProject,
+        scenes: scenesToVerify.map(({ scene, candidates }) => ({
+          sceneNumber: scene.scene_number,
+          narration: scene.narration || scene.subtitle_text || '',
+          visualDescription: scene.visual_description || '',
+          primaryKeyword: scene.primary_keyword || '',
+          candidates: candidates.map((c, idx) => ({
+            idx,
+            mediaType: c.mediaType,
+            provider: String(c.licenseMetadata?.source || c.provider),
+            description: c.titleOrTags || c.authorName,
+            lexicalScore: c.relevanceScore,
+          })),
+        })),
+      });
+
+      for (const { scene, searchInput, candidates } of scenesToVerify) {
+        const decision = verificationMap.get(scene.scene_number);
+        let chosen: ScoredMediaCandidate | null = null;
+
+        if (decision && decision.selectedIdx !== null && decision.confidence >= 55) {
+          const picked = candidates[decision.selectedIdx];
+          if (picked && !usedExternalIds.has(picked.externalId)) {
+            chosen = {
+              ...picked,
+              relevanceScore: Math.max(picked.relevanceScore, Math.round((decision.confidence / 100) * 1000) / 1000),
+            };
+          }
+        }
+
+        // Fallback to high-confidence lexical match only if AI verifier did not explicitly reject it
+        if (!chosen && !decision) {
+          const strongUnused = candidates.find(
+            (c) => !usedExternalIds.has(c.externalId) && c.relevanceScore >= (isCartoonProject ? 0.6 : 0.56)
+          );
+          if (strongUnused) chosen = strongUnused;
+        }
+
+        // Targeted rescue: re-search with AI's sharper query or generate exact artwork via AI Horde
+        if (!chosen) {
+          chosen = await rescueUnmatchedSceneMedia(
+            { ...searchInput, usedExternalIds },
+            {
+              refinedQuery: decision?.refinedQuery,
+              imagePrompt: decision?.imagePrompt || scene.visual_description,
+              fallbackPool: candidates,
+            }
+          );
+        }
+
+        if (!chosen) {
+          throw new Error(
+            `No relevant footage found for Scene ${scene.scene_number} ("${scene.primary_keyword}"). Try simplifying scene keywords or adding a custom open-source URL.`
+          );
+        }
+
+        usedExternalIds.add(chosen.externalId);
+        pendingDownloads.push({ scene, candidate: chosen });
       }
-      usedExternalIds.add(candidate.externalId);
-      pendingDownloads.push({ scene, candidate });
     }
 
     markStageDone('searching_media');
@@ -666,6 +804,22 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
     timelineClips.sort((a, b) => a.sceneNumber - b.sceneNumber);
     markStageDone('downloading_media');
 
+    const parsedNarration = parseDelimitedScriptSections(
+      latestScript.narration_text || latestScript.script_text || ''
+    );
+    const cleanNarrationText =
+      parsedNarration.voiceoverScript ||
+      sanitizeSpokenNarration(latestScript.narration_text || latestScript.script_text);
+
+    const syncedTimelineClips = reconcileClipsSubtitleCoverage(timelineClips, cleanNarrationText);
+    // Lock TTS synthesis 1:1 verbatim to the exact scene beats so spoken voiceover, scene cuts, and subtitles match word-for-word
+    const sceneJoinedNarration = syncedTimelineClips
+      .map((c) => sanitizeSpokenNarration(c.subtitleText || ''))
+      .filter(Boolean)
+      .join(' ')
+      .trim();
+    const ttsSpokenText = sceneJoinedNarration || cleanNarrationText;
+
     // =========================================================================
     // STAGE 6: Voice Generation (Gemini TTS / ElevenLabs) — cached on retry
     // =========================================================================
@@ -680,6 +834,7 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
         .download(project.narration_audio_path);
       if (audioBlob) {
         await fs.writeFile(localNarrationPath, Buffer.from(await audioBlob.arrayBuffer()));
+        narrationDurationSec = await probeAudioDurationSeconds(localNarrationPath);
       } else {
         localNarrationPath = '';
       }
@@ -687,16 +842,10 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
 
     if (!localNarrationPath) {
       await updateJobStage(job.id, project.id, 'generating_voice', 62, 'Synthesizing clean voice-over (spoken text only)', completedStages);
-      const parsedNarration = parseDelimitedScriptSections(
-        latestScript.narration_text || latestScript.script_text || ''
-      );
-      const cleanNarrationText =
-        parsedNarration.voiceoverScript ||
-        sanitizeSpokenNarration(latestScript.narration_text || latestScript.script_text);
       const voiceResult = await synthesizeNarration({
         userId: job.user_id,
         projectId: project.id,
-        text: cleanNarrationText,
+        text: ttsSpokenText,
         language: project.language,
         preferredProvider: (project.voice_provider as VoiceProviderName) || 'gemini_tts',
         voiceId: project.voice_id || 'Charon',
@@ -716,9 +865,9 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
     }
 
     // =========================================================================
-    // STAGE 7 & 8: Dead-Air Trim + Whisper Word Sync + Sound Design + FFmpeg Render
+    // STAGE 7 & 8: Dead-Air Trim + Multi-Tier Audio Alignment + Sound Design + FFmpeg Render
     // =========================================================================
-    await updateJobStage(job.id, project.id, 'preparing_timeline', 68, 'Trimming dead air & aligning captions via Whisper', completedStages);
+    await updateJobStage(job.id, project.id, 'preparing_timeline', 68, 'Trimming dead air & synchronizing captions to voiceover', completedStages);
 
     if (whisperSyncEnabled || editingPace === 'viral_fast') {
       const trimmed = await trimAudioDeadAir({
@@ -730,7 +879,14 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
       narrationDurationSec = trimmed.durationSec;
     }
 
+    // Always probe actual non-silent speech intervals locally via FFmpeg (~50ms)
+    const speechIntervals: AudioSpeechInterval[] = await detectAudioSpeechIntervals(
+      localNarrationPath,
+      narrationDurationSec
+    );
+
     let whisperWords: WordTimestamp[] = [];
+    let geminiSceneTimings: SceneTimingHint[] = [];
     if (whisperSyncEnabled) {
       const aligned = await alignNarrationWithGroqWhisper({
         userId: job.user_id,
@@ -739,6 +895,20 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
       });
       if (aligned?.words?.length) {
         whisperWords = aligned.words;
+      } else {
+        const geminiHints = await alignScenesWithGeminiAudio({
+          userId: job.user_id,
+          workDir,
+          audioPath: localNarrationPath,
+          durationSec: narrationDurationSec,
+          scenes: syncedTimelineClips.map((c) => ({
+            sceneNumber: c.sceneNumber,
+            text: sanitizeSpokenNarration(c.subtitleText || ''),
+          })),
+        });
+        if (geminiHints?.length) {
+          geminiSceneTimings = geminiHints;
+        }
       }
     }
 
@@ -817,7 +987,7 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
 
     const rendered = await renderVideoWithFfmpeg({
       workDir,
-      clips: timelineClips,
+      clips: syncedTimelineClips,
       narrationAudioPath: localNarrationPath,
       totalNarrationDurationSec: narrationDurationSec,
       format: project.format,
@@ -827,6 +997,8 @@ export async function executeVideoJob(job: VideoJobRow): Promise<void> {
       colorGrade,
       hookBannerText,
       whisperWords,
+      speechIntervals,
+      geminiSceneTimings,
       backgroundMusicPath: localMusicPath,
       musicVolume: musicCfg.music_volume ?? 0.16,
       narrationVolume: musicCfg.narration_volume ?? 1.05,

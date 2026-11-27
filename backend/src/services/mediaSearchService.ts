@@ -84,8 +84,8 @@ export function buildAiVisualSearchQuery(
 }
 
 /**
- * Multi-factor media relevance scorer (keyword overlap + voiceover context + orientation + resolution + duration + type).
- * Prevents assigning unrelated clips merely because a search returned results.
+ * Multi-factor media relevance scorer with primary-subject anchoring and a strict zero-relevance gate.
+ * Technical metadata (HD, portrait, duration) can NEVER push an unrelated clip past the acceptance threshold.
  */
 export function scoreMediaCandidate(
   candidate: MediaCandidate,
@@ -101,17 +101,40 @@ export function scoreMediaCandidate(
 ): number {
   if (params.alreadyUsed) return 0;
 
-  const targetTokens = tokenize(
+  const primaryTokens = tokenize(params.keywords.slice(0, 2).join(' '));
+  const contextTokens = tokenize(
     `${params.keywords.join(' ')} ${params.visualDescription} ${params.narration || ''}`
   );
   const candidateTokens = tokenize(candidate.titleOrTags);
 
-  let overlap = 0;
-  for (const token of targetTokens) {
-    if (candidateTokens.has(token)) overlap++;
+  let primaryOverlap = 0;
+  for (const token of primaryTokens) {
+    if (candidateTokens.has(token)) primaryOverlap++;
   }
-  const keywordScore =
-    targetTokens.size > 0 ? Math.min(1, overlap / Math.min(4, targetTokens.size)) : 0.4;
+
+  let contextOverlap = 0;
+  for (const token of contextTokens) {
+    if (candidateTokens.has(token)) contextOverlap++;
+  }
+
+  const primaryScore =
+    primaryTokens.size > 0
+      ? Math.min(1, primaryOverlap / Math.min(2, primaryTokens.size))
+      : 0;
+  const contextScore =
+    contextTokens.size > 0
+      ? Math.min(1, contextOverlap / Math.min(4, contextTokens.size))
+      : 0.35;
+
+  const semanticScore =
+    primaryTokens.size > 0
+      ? Math.min(1, primaryScore * 0.75 + contextScore * 0.25)
+      : contextScore;
+
+  // Hard semantic gate: zero lexical overlap cannot score above 0.12 regardless of HD/portrait specs
+  const totalOverlap = Math.max(primaryOverlap, contextOverlap);
+  const semanticGate =
+    totalOverlap === 0 ? 0.12 : primaryTokens.size > 0 && primaryOverlap === 0 && contextOverlap <= 1 ? 0.34 : 1.0;
 
   // Orientation match score
   const ratio = candidate.height > 0 ? candidate.width / candidate.height : 1;
@@ -129,7 +152,7 @@ export function scoreMediaCandidate(
   const resolutionScore = minDim >= 1080 ? 1.0 : minDim >= 720 ? 0.85 : minDim >= 480 ? 0.58 : 0.3;
 
   // Duration suitability (penalize ultra-short < 2.2s video clips that loop choppily)
-  let durationScore = 0.8;
+  let durationScore = 0.85;
   if (candidate.mediaType === 'video' && candidate.durationSec > 0) {
     if (candidate.durationSec < 2.2) {
       durationScore = 0.2;
@@ -145,16 +168,19 @@ export function scoreMediaCandidate(
     }
   }
 
-  const typeScore = candidate.mediaType === params.preferredType ? 1.0 : 0.68;
+  const typeScore = candidate.mediaType === params.preferredType ? 1.0 : 0.72;
 
-  const weighted =
-    keywordScore * 0.52 +
-    orientationScore * 0.18 +
-    resolutionScore * 0.12 +
-    durationScore * 0.1 +
-    typeScore * 0.08;
+  const technicalScore =
+    orientationScore * 0.42 +
+    resolutionScore * 0.26 +
+    durationScore * 0.18 +
+    typeScore * 0.14;
 
-  return Math.round(Math.max(0, Math.min(1, weighted)) * 1000) / 1000;
+  const combined =
+    semanticScore * 0.72 + technicalScore * 0.28 * Math.min(1, semanticScore + 0.25);
+
+  const gated = Math.min(semanticGate, combined);
+  return Math.round(Math.max(0, Math.min(1, gated)) * 1000) / 1000;
 }
 
 function extractUrlSlugText(url: string): string {
@@ -170,6 +196,15 @@ function extractUrlSlugText(url: string): string {
   }
 }
 
+function stemToken(word: string): string {
+  if (word.length > 5 && word.endsWith('ies')) return `${word.slice(0, -3)}y`;
+  if (word.length > 5 && word.endsWith('ing')) return word.slice(0, -3);
+  if (word.length > 4 && word.endsWith('es') && !word.endsWith('ses')) return word.slice(0, -2);
+  if (word.length > 4 && word.endsWith('ed')) return word.slice(0, -2);
+  if (word.length > 3 && word.endsWith('s') && !word.endsWith('ss')) return word.slice(0, -1);
+  return word;
+}
+
 function tokenize(input: string): Set<string> {
   const stopWords = new Set([
     'the',
@@ -180,6 +215,14 @@ function tokenize(input: string): Set<string> {
     'that',
     'this',
     'into',
+    'over',
+    'under',
+    'about',
+    'their',
+    'there',
+    'which',
+    'while',
+    'being',
     'shot',
     'scene',
     'view',
@@ -193,15 +236,69 @@ function tokenize(input: string): Set<string> {
     'footage',
     'showing',
     'close',
+    'closeup',
     'cinematic',
+    'man',
+    'woman',
+    'person',
+    'people',
+    'human',
+    'dark',
+    'light',
+    'bright',
+    'background',
+    'abstract',
+    'motion',
+    'slow',
+    'fast',
+    'dramatic',
+    'glowing',
+    'epic',
+    'modern',
+    'concept',
+    'particle',
+    'particles',
+    'texture',
+    'pattern',
+    'blur',
+    'bokeh',
+    'loop',
+    'clip',
+    'beautiful',
+    'amazing',
+    'high',
+    'quality',
+    'full',
+    'vertical',
+    'portrait',
+    'landscape',
+    'aerial',
   ]);
-  return new Set(
-    input
-      .toLowerCase()
-      .replace(/[^a-z0-9\s]/g, ' ')
-      .split(/\s+/)
-      .filter((w) => w.length >= 3 && !stopWords.has(w))
-  );
+  const out = new Set<string>();
+  const words = input
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/);
+  for (const raw of words) {
+    if (raw.length < 3 || stopWords.has(raw)) continue;
+    const stemmed = stemToken(raw);
+    if (stemmed.length >= 3 && !stopWords.has(stemmed)) {
+      out.add(stemmed);
+    }
+  }
+  return out;
+}
+
+function hasNamedEntityOrBrandHint(input: SceneMediaSearchInput): boolean {
+  if (input.preferredType === 'image') return true;
+  const kw = input.primaryKeyword.trim();
+  const desc = input.visualDescription.trim();
+  // Detect proper nouns (e.g. Nvidia, Jensen Huang, Tesla, Taj Mahal, Bitcoin) or logos/portraits
+  if (/\b(logo|ceo|founder|portrait|headquarters|building|statue|monument|company|brand)\b/i.test(`${kw} ${desc}`)) {
+    return true;
+  }
+  const midSentenceCaps = desc.slice(1).match(/\b[A-Z][a-z]{2,}\b/g);
+  return Boolean(midSentenceCaps && midSentenceCaps.length >= 1);
 }
 
 /**
@@ -689,7 +786,7 @@ export async function searchLexicaImages(query: string): Promise<MediaCandidate[
           width: w,
           height: h,
           durationSec: 0,
-          titleOrTags: `${img.prompt || ''} ${query}`.trim(),
+          titleOrTags: (img.prompt || '').trim(),
           authorName: 'Lexica AI',
           licenseMetadata: {
             source: 'Lexica AI',
@@ -779,7 +876,7 @@ export async function searchCivitaiImages(query: string): Promise<MediaCandidate
           durationSec: 0,
           titleOrTags: `${item.name || ''} ${(item.tags || []).join(' ')} ${
             img.meta?.prompt || ''
-          } ${query}`.trim(),
+          }`.trim(),
           authorName: 'Civitai AI',
           licenseMetadata: {
             source: 'Civitai AI',
@@ -1044,17 +1141,59 @@ async function searchInternetArchiveVideos(query: string): Promise<MediaCandidat
   }
 }
 
+function evaluateCandidatesForScene(
+  candidates: MediaCandidate[],
+  input: SceneMediaSearchInput,
+  keywords: string[],
+  opts: { isFallback: boolean; cartoonIntent: boolean; hasNoStockApiKey: boolean }
+): ScoredMediaCandidate[] {
+  return candidates
+    .map((c) => {
+      const baseScore = scoreMediaCandidate(c, {
+        keywords,
+        visualDescription: input.visualDescription,
+        narration: input.narration,
+        targetDurationSec: input.targetDurationSec,
+        format: input.format,
+        preferredType: opts.cartoonIntent ? 'image' : input.preferredType,
+        alreadyUsed: input.usedExternalIds.has(c.externalId),
+      });
+      // Boost stylized AI artwork only when there is real semantic relevance (> 0.34)
+      const styleBoost =
+        baseScore > 0.34 && c.provider === 'ai_generated' && (opts.cartoonIntent || opts.hasNoStockApiKey)
+          ? 0.08
+          : 0;
+      const adjusted = Math.round(Math.min(1, baseScore + styleBoost) * 1000) / 1000;
+      return {
+        ...c,
+        isFallback: opts.isFallback,
+        relevanceScore: adjusted,
+      };
+    })
+    .filter((c) => c.relevanceScore > 0);
+}
+
+function dedupeAndSortCandidates(list: ScoredMediaCandidate[], limit = 6): ScoredMediaCandidate[] {
+  const bestById = new Map<string, ScoredMediaCandidate>();
+  for (const item of list) {
+    const prev = bestById.get(item.externalId);
+    if (!prev || item.relevanceScore > prev.relevanceScore) {
+      bestById.set(item.externalId, item);
+    }
+  }
+  return Array.from(bestById.values())
+    .sort((a, b) => b.relevanceScore - a.relevanceScore)
+    .slice(0, limit);
+}
+
 /**
- * Executes voiceover-matched media search cascade:
- * 0. User-provided custom / open-source direct link for this scene (highest priority!)
- * 1. Pexels & Pixabay stock video + Internet Archive open-source video (when enabled & non-cartoon)
- * 2. Open-Source & AI Visual Libraries (Lexica AI, Civitai AI, Openverse AI, Wikimedia Commons, NASA)
- *    + Stock images (Pexels, Pixabay) — works with ZERO user Pexels/Pixabay API keys!
- * 3. Live AI Horde image generation fallback for cartoons or unmatched scenes.
+ * Gathers a multi-source candidate pool for one scene across stock videos AND open-source / AI
+ * visual libraries (Wikimedia Commons, Openverse, Lexica AI, Civitai AI, NASA, Pexels, Pixabay)
+ * so an AI continuity verifier can pick the visual that literally matches the voiceover beat.
  */
-export async function findBestMediaForScene(
+export async function gatherSceneMediaCandidates(
   input: SceneMediaSearchInput
-): Promise<ScoredMediaCandidate | null> {
+): Promise<{ customMatch: ScoredMediaCandidate | null; candidates: ScoredMediaCandidate[] }> {
   // Pass 0: Exact user-supplied media link for this scene
   if (input.customMediaUrl?.trim()) {
     try {
@@ -1062,7 +1201,7 @@ export async function findBestMediaForScene(
         input.customMediaUrl.trim(),
         input.visualDescription || input.primaryKeyword
       );
-      if (resolved) return resolved;
+      if (resolved) return { customMatch: resolved, candidates: [] };
     } catch (err) {
       console.warn(
         `[AutoTube Media] Custom link skipped for scene ${input.sceneId}: ${
@@ -1076,6 +1215,7 @@ export async function findBestMediaForScene(
   const useApis = mode !== 'open_source_only';
   const useOpenSource = mode !== 'api_only';
   const cartoonIntent = isCartoonOrStylizedIntent(input);
+  const namedEntityHint = hasNamedEntityOrBrandHint(input);
 
   const pexelsCred = useApis ? await resolveUserProviderKey(input.userId, 'pexels') : null;
   const pixabayCred = useApis ? await resolveUserProviderKey(input.userId, 'pixabay') : null;
@@ -1085,101 +1225,120 @@ export async function findBestMediaForScene(
     .map((k) => k.trim())
     .filter(Boolean);
 
-  const evaluate = (candidates: MediaCandidate[], isFallback: boolean): ScoredMediaCandidate[] =>
-    candidates
-      .map((c) => {
-        const baseScore = scoreMediaCandidate(c, {
-          keywords,
-          visualDescription: input.visualDescription,
-          narration: input.narration,
-          targetDurationSec: input.targetDurationSec,
-          format: input.format,
-          preferredType: cartoonIntent ? 'image' : input.preferredType,
-          alreadyUsed: input.usedExternalIds.has(c.externalId),
-        });
-        // Boost Lexica/Civitai/AI Horde stylized artwork when creating cartoons or when no stock keys exist
-        const styleBoost =
-          baseScore > 0.15 && c.provider === 'ai_generated' && (cartoonIntent || hasNoStockApiKey)
-            ? 0.12
-            : 0;
-        const adjusted = Math.round(Math.min(1, baseScore + styleBoost) * 1000) / 1000;
-        return {
-          ...c,
-          isFallback,
-          relevanceScore: adjusted,
-        };
-      })
-      .filter((c) => c.relevanceScore >= (hasNoStockApiKey || cartoonIntent ? 0.24 : 0.34))
-      .sort((a, b) => b.relevanceScore - a.relevanceScore);
+  const evalOpts = { cartoonIntent, hasNoStockApiKey };
+  const rawPool: ScoredMediaCandidate[] = [];
 
-  // Pass 1: Stock video search across keywords and providers (skipped in cartoon mode so animated art wins)
-  const allVideoCandidates: ScoredMediaCandidate[] = [];
+  // Pass 1: Stock videos (Pexels / Pixabay) for non-cartoon scenes
   if (useApis && !cartoonIntent && (pexelsCred || pixabayCred)) {
-    for (const kw of keywords.slice(0, 3)) {
-      const batch: MediaCandidate[] = [];
-      if (pexelsCred) {
-        batch.push(...(await searchPexels(pexelsCred.apiKey, kw, 'video', input.format)));
-      }
-      if (pixabayCred) {
-        batch.push(...(await searchPixabay(pixabayCred.apiKey, kw, 'video')));
-      }
-      const ranked = evaluate(batch, false);
-      if (ranked.length > 0 && ranked[0].relevanceScore >= 0.72 && ranked[0].durationSec >= 2.5) {
-        return ranked[0];
-      }
-      allVideoCandidates.push(...ranked);
+    for (const kw of keywords.slice(0, 2)) {
+      const queries: Array<Promise<MediaCandidate[]>> = [];
+      if (pexelsCred) queries.push(searchPexels(pexelsCred.apiKey, kw, 'video', input.format));
+      if (pixabayCred) queries.push(searchPixabay(pixabayCred.apiKey, kw, 'video'));
+      const batches = await Promise.all(queries);
+      rawPool.push(...evaluateCandidatesForScene(batches.flat(), input, keywords, { ...evalOpts, isFallback: false }));
     }
   }
 
-  // Pass 1b: Open-source video search (Internet Archive) for non-cartoon scenes when no strong API video matched
-  if (
-    useOpenSource &&
+  const topVideoNow = dedupeAndSortCandidates(rawPool, 1)[0];
+  const hasUltraStrongVideo =
+    Boolean(topVideoNow && topVideoNow.relevanceScore >= 0.84 && topVideoNow.durationSec >= 2.5) &&
     !cartoonIntent &&
-    keywords.length > 0 &&
-    (!allVideoCandidates[0] || allVideoCandidates[0].relevanceScore < 0.62)
-  ) {
+    !namedEntityHint;
+
+  // Pass 2: Always also query Open-Source + AI visual libraries (Wikimedia, Openverse, Lexica, Civitai, NASA, stock images)
+  // unless a near-perfect non-entity stock video already matched — guarantees named people/brands/objects match accurately!
+  if (!hasUltraStrongVideo) {
+    for (const kw of keywords.slice(0, 2)) {
+      const queries: Array<Promise<MediaCandidate[]>> = [];
+      if (pexelsCred) queries.push(searchPexels(pexelsCred.apiKey, kw, 'image', input.format));
+      if (pixabayCred) queries.push(searchPixabay(pixabayCred.apiKey, kw, 'image'));
+      if (useOpenSource) {
+        const aiQuery = buildAiVisualSearchQuery(kw, input.visualDescription, cartoonIntent);
+        queries.push(searchLexicaImages(aiQuery));
+        queries.push(searchCivitaiImages(aiQuery));
+        queries.push(searchOpenverseImages(kw, input.format));
+        queries.push(searchWikimediaCommonsImages(kw));
+        if (!cartoonIntent) {
+          queries.push(searchNasaImages(kw));
+        }
+      }
+      const batches = await Promise.all(queries);
+      rawPool.push(...evaluateCandidatesForScene(batches.flat(), input, keywords, { ...evalOpts, isFallback: true }));
+    }
+  }
+
+  // Pass 2b: Open-source Internet Archive video if non-cartoon and pool still weak
+  const topSoFar = dedupeAndSortCandidates(rawPool, 1)[0];
+  if (useOpenSource && !cartoonIntent && keywords.length > 0 && (!topSoFar || topSoFar.relevanceScore < 0.62)) {
     const iaBatch = await searchInternetArchiveVideos(keywords[0]);
-    allVideoCandidates.push(...evaluate(iaBatch, false));
+    rawPool.push(...evaluateCandidatesForScene(iaBatch, input, keywords, { ...evalOpts, isFallback: false }));
   }
 
-  allVideoCandidates.sort((a, b) => b.relevanceScore - a.relevanceScore);
-  if (allVideoCandidates.length > 0 && allVideoCandidates[0].relevanceScore >= 0.52) {
-    return allVideoCandidates[0];
-  }
+  const ranked = dedupeAndSortCandidates(rawPool, 8);
+  const meaningful = ranked.filter((c) => c.relevanceScore >= 0.28);
+  return {
+    customMatch: null,
+    candidates: meaningful.length > 0 ? meaningful.slice(0, 6) : ranked.slice(0, 3),
+  };
+}
 
-  // Pass 2: Backend AI & Open-Source Image Cascade (Lexica AI, Civitai AI, Openverse, Wikimedia, NASA + Stock images)
-  const allImageCandidates: ScoredMediaCandidate[] = [];
-  for (const kw of keywords.slice(0, 2)) {
+/**
+ * Targeted rescue flow when the initial candidate pool didn't match the spoken beat accurately:
+ * 1. Re-searches enabled providers with the AI verifier's sharper concrete English `refinedQuery`.
+ * 2. Generates a literal scene-matched visual via AI Horde using `imagePrompt || visualDescription`.
+ * 3. Falls back to the highest-scoring unused candidate only if both rescue paths fail.
+ */
+export async function rescueUnmatchedSceneMedia(
+  input: SceneMediaSearchInput,
+  opts: {
+    refinedQuery?: string;
+    imagePrompt?: string;
+    fallbackPool: ScoredMediaCandidate[];
+  }
+): Promise<ScoredMediaCandidate | null> {
+  const mode: MediaSourceMode = input.mediaSourceMode || 'all';
+  const useApis = mode !== 'open_source_only';
+  const useOpenSource = mode !== 'api_only';
+  const cartoonIntent = isCartoonOrStylizedIntent(input);
+
+  const refined = (opts.refinedQuery || '').trim();
+  const rescueCandidates: ScoredMediaCandidate[] = [];
+
+  if (refined) {
+    const pexelsCred = useApis ? await resolveUserProviderKey(input.userId, 'pexels') : null;
+    const pixabayCred = useApis ? await resolveUserProviderKey(input.userId, 'pixabay') : null;
+    const hasNoStockApiKey = !pexelsCred && !pixabayCred;
+    const keywords = [refined, input.primaryKeyword, ...input.alternativeKeywords].filter(Boolean);
+
     const queries: Array<Promise<MediaCandidate[]>> = [];
-    if (pexelsCred) queries.push(searchPexels(pexelsCred.apiKey, kw, 'image', input.format));
-    if (pixabayCred) queries.push(searchPixabay(pixabayCred.apiKey, kw, 'image'));
+    if (pexelsCred && !cartoonIntent) queries.push(searchPexels(pexelsCred.apiKey, refined, 'video', input.format));
+    if (pixabayCred && !cartoonIntent) queries.push(searchPixabay(pixabayCred.apiKey, refined, 'video'));
+    if (pexelsCred) queries.push(searchPexels(pexelsCred.apiKey, refined, 'image', input.format));
+    if (pixabayCred) queries.push(searchPixabay(pixabayCred.apiKey, refined, 'image'));
     if (useOpenSource) {
-      const aiQuery = buildAiVisualSearchQuery(kw, input.visualDescription, cartoonIntent);
+      const aiQuery = buildAiVisualSearchQuery(refined, opts.imagePrompt || input.visualDescription, cartoonIntent);
+      queries.push(searchOpenverseImages(refined, input.format));
+      queries.push(searchWikimediaCommonsImages(refined));
       queries.push(searchLexicaImages(aiQuery));
       queries.push(searchCivitaiImages(aiQuery));
-      queries.push(searchOpenverseImages(kw, input.format));
-      queries.push(searchWikimediaCommonsImages(kw));
-      if (!cartoonIntent) {
-        queries.push(searchNasaImages(kw));
-      }
     }
     const batches = await Promise.all(queries);
-    const merged = batches.flat();
-    const ranked = evaluate(merged, true);
-    if (ranked.length > 0 && ranked[0].relevanceScore >= 0.72) {
-      return ranked[0];
-    }
-    allImageCandidates.push(...ranked);
+    rescueCandidates.push(
+      ...evaluateCandidatesForScene(batches.flat(), input, keywords, {
+        isFallback: true,
+        cartoonIntent,
+        hasNoStockApiKey,
+      })
+    );
   }
 
-  // Pass 3: AI Horde live backend generation when search didn't find a strong visual
-  allImageCandidates.sort((a, b) => b.relevanceScore - a.relevanceScore);
-  const bestVid = allVideoCandidates[0] || null;
-  const bestImg = allImageCandidates[0] || null;
-  const bestCurrentScore = Math.max(bestVid?.relevanceScore || 0, bestImg?.relevanceScore || 0);
+  const bestRefined = dedupeAndSortCandidates(rescueCandidates, 1)[0] || null;
+  if (bestRefined && bestRefined.relevanceScore >= 0.58) {
+    return bestRefined;
+  }
 
-  if (useOpenSource && bestCurrentScore < (cartoonIntent ? 0.52 : 0.42)) {
-    const hordePrompt = input.visualDescription || input.primaryKeyword;
+  if (useOpenSource) {
+    const hordePrompt = (opts.imagePrompt || input.visualDescription || refined || input.primaryKeyword).trim();
     const hordeAsset = await generateImageWithAiHorde({
       prompt: hordePrompt,
       format: input.format,
@@ -1190,10 +1349,35 @@ export async function findBestMediaForScene(
     }
   }
 
-  if (bestVid && bestImg) {
-    return bestImg.relevanceScore >= bestVid.relevanceScore + 0.14 ? bestImg : bestVid;
+  const unusedFallback = opts.fallbackPool.find((c) => !input.usedExternalIds.has(c.externalId)) || null;
+  if (bestRefined && unusedFallback) {
+    return bestRefined.relevanceScore >= unusedFallback.relevanceScore ? bestRefined : unusedFallback;
   }
-  return bestVid || bestImg || null;
+  return bestRefined || unusedFallback || null;
+}
+
+/**
+ * Executes voiceover-matched media search cascade:
+ * 0. User-provided custom / open-source direct link for this scene (highest priority!)
+ * 1. Multi-source pool across Pexels/Pixabay + Wikimedia/Openverse/Lexica/Civitai/NASA/Internet Archive
+ * 2. Live AI Horde image generation fallback when no strong semantic match (>= 0.56) was found.
+ */
+export async function findBestMediaForScene(
+  input: SceneMediaSearchInput
+): Promise<ScoredMediaCandidate | null> {
+  const { customMatch, candidates } = await gatherSceneMediaCandidates(input);
+  if (customMatch) return customMatch;
+
+  const cartoonIntent = isCartoonOrStylizedIntent(input);
+  const top = candidates[0] || null;
+  if (top && top.relevanceScore >= (cartoonIntent ? 0.6 : 0.56)) {
+    return top;
+  }
+
+  return rescueUnmatchedSceneMedia(input, {
+    imagePrompt: input.visualDescription || input.primaryKeyword,
+    fallbackPool: candidates,
+  });
 }
 
 /**

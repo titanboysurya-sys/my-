@@ -743,7 +743,7 @@ export async function generateScriptWithAI(
     hookStyle === 'viral_retention'
       ? `VIRAL RETENTION FORMULA:
 - 0-2s PATTERN-INTERRUPT HOOK: Start sentence #1 with a shocking counter-intuitive truth, bold claim, or urgent curiosity gap (ZERO slow intros or greetings).
-- EVERY 7-9s RE-HOOK TWIST: Inject micro curiosity twists ("Wait—here is the part nobody notices...", or equivalent natural idiom in ${lang.name}) so viewers do not swipe away.
+- EVERY 7-9s RE-HOOK TWIST: Naturally escalate curiosity with topic-specific pivots and stakes in ${lang.name} (never copy generic meta-filler or template phrases) so viewers do not swipe away.
 - SHORT PUNCHY SENTENCES: Keep average sentence length crisp (6-13 words) for breathless Shorts pacing.${
           isShortForm
             ? `\n- SEAMLESS LOOP ENDING: End the final sentence mid-thought or in a way that flows grammatically right back into the very first word of the hook so auto-replay feels seamless!`
@@ -868,12 +868,18 @@ export async function generateSceneBreakdownWithAI(
   );
   const lang = resolveLanguageMeta(params.language);
 
-  const systemPrompt = `You are a viral YouTube Shorts & documentary video editor breaking a pure Voiceover Script into tightly synchronized, fast-moving visual scenes for stock footage assembly (Pexels / Pixabay / Wikimedia / NASA).
+  const systemPrompt = `You are a precision documentary & YouTube Shorts video editor breaking a pure Voiceover Script into tightly synchronized visual scenes where EVERY SINGLE SHOT literally matches the exact words being spoken at that moment.
 RULES:
-1. VERBATIM NARRATION COVERAGE: Split voiceoverScript sequentially from start to finish into ~${recommendedScenes} snappy visual beats (~${secPerScene.toFixed(1)}s each) so concatenating all scenes[].narration reproduces 100% of voiceoverScript in exact order without skipping, summarizing, or translating a single sentence.
+1. VERBATIM 1:1 NARRATION COVERAGE: Split voiceoverScript sequentially from start to finish into ~${recommendedScenes} crisp visual beats (~${secPerScene.toFixed(1)}s each) so concatenating all scenes[].narration reproduces 100% of voiceoverScript in exact order without skipping, summarizing, adding, or translating a single word.
 2. SPOKEN-ONLY SUBTITLES: Both scenes[].narration and scenes[].subtitleText MUST contain ONLY the exact spoken words from voiceoverScript in ${lang.name} — NEVER copy anything from videoVisualInstructionsContext, [Scene], [Visual], camera notes, or labels into narration or subtitleText.
-3. FILMABLE ENGLISH VISUAL QUERIES: Use videoVisualInstructionsContext (if provided) plus what is being spoken to craft concise, concrete, literally filmable English stock-video queries (2-3 words) for primaryKeyword and alternativeKeywords (e.g. "smartphone screen hand", "server room glowing", "doctor examining xray", "rocket launch fire"). NEVER use abstract words like "facts", "secret", "future", "success", "concept", "motivation", or the full sentence.
-4. DYNAMIC MOTION & TRANSITIONS: Prefer "video" for mediaTypePreference on almost all scenes, and use energetic transitions from ["punch", "flash", "cut", "slide", "zoom"] (especially "punch" or "flash" on high-impact moments!).
+3. LITERAL CONCRETE ENGLISH VISUAL QUERIES (NO METAPHOR TRAPS):
+   - Every scene's visualDescription, primaryKeyword (2-4 concrete English words), and alternativeKeywords MUST depict the EXACT literal subject, person, animal, object, place, or action being spoken in THAT beat.
+   - If the narration is in Hindi, Hinglish, or another non-English language, accurately translate the literal subject and action into clear English for visualDescription, primaryKeyword, and alternativeKeywords.
+   - NEVER search abstract nouns or literalized metaphors/idioms (e.g. NEVER search "storm", "time bomb", "secret", "danger", "facts", "future", "success", "concept", "motivation", "problem" unless the narrator is literally talking about weather or explosives!). Instead depict the real concrete scene (e.g. for "Nvidia credit rating crisis", use "nvidia microchip circuit board", "stock market red chart", "corporate skyscraper finance").
+4. SMART MEDIA TYPE ROUTING:
+   - Use mediaTypePreference: "image" whenever the beat mentions a SPECIFIC named real-world person, CEO, politician, company, brand, logo, landmark, historical figure/artifact (e.g. "Jensen Huang", "Nvidia", "Taj Mahal", "Albert Einstein") OR a cartoon / animated / fictional storybook character — so real Wikimedia/Openverse photos or Lexica/AI Horde illustrations match accurately.
+   - Use mediaTypePreference: "video" for concrete filmable stock actions and real-world scenes (e.g. "engineer soldering microchip", "stock ticker red screen", "doctor examining xray", "rocket launch pad fire").
+   - Use energetic transitions from ["punch", "flash", "cut", "slide", "zoom"].
 Return strictly valid JSON.`;
 
   const parsedVoiceover = parseDelimitedScriptSections(params.narrationText);
@@ -899,10 +905,10 @@ Return strictly valid JSON.`;
           sceneNumber: 1,
           narration: `exact verbatim spoken segment from voiceoverScript in ${lang.name} (NEVER visual cues)`,
           estimatedDuration: secPerScene,
-          visualDescription: 'concrete physical visual scene matching what is being said right now',
-          primaryKeyword: 'concrete 2-3 word english stock footage query',
+          visualDescription: 'concrete literal physical visual scene depicting exactly what is spoken in this beat (in English)',
+          primaryKeyword: 'concrete 2-4 word english visual search query',
           alternativeKeywords: ['concrete english alt query 1', 'concrete english alt query 2'],
-          mediaTypePreference: 'video',
+          mediaTypePreference: 'video or image (image for named people/brands/landmarks/cartoons)',
           transition: 'punch',
           subtitleText: `exact verbatim spoken words in ${lang.name} matching narration`,
         },
@@ -931,6 +937,138 @@ Return strictly valid JSON.`;
     };
   });
 }
+
+export interface SceneVisualCandidateSummary {
+  idx: number;
+  mediaType: 'video' | 'image';
+  provider: string;
+  description: string;
+  lexicalScore: number;
+}
+
+export interface SceneVisualVerificationDecision {
+  sceneNumber: number;
+  selectedIdx: number | null;
+  confidence: number;
+  refinedQuery?: string;
+  imagePrompt?: string;
+}
+
+/**
+ * Single-call batch semantic verifier that checks every scene's candidate visuals against the
+ * EXACT spoken voiceover beat. Rejects generic/off-topic stock clips (e.g. random people, dust,
+ * homonyms) and supplies a refined search query + concrete image generation prompt when needed.
+ */
+export async function verifySceneVisualMatchesWithAI(
+  ai: AIProviderClient,
+  params: {
+    topic: string;
+    niche: string;
+    isCartoon: boolean;
+    scenes: Array<{
+      sceneNumber: number;
+      narration: string;
+      visualDescription: string;
+      primaryKeyword: string;
+      candidates: SceneVisualCandidateSummary[];
+    }>;
+  }
+): Promise<Map<number, SceneVisualVerificationDecision>> {
+  const decisions = new Map<number, SceneVisualVerificationDecision>();
+  if (params.scenes.length === 0) return decisions;
+
+  const systemPrompt = `You are a strict visual continuity director verifying that EVERY video scene's visual literally matches the exact spoken voiceover narration for that beat.
+RULES:
+1. For each scene, read its spoken "narration" (may be English, Hindi, or Hinglish), its "visualDescription", and its candidate list.
+2. Pick "selectedIdx" ONLY if that candidate genuinely and unmistakably depicts the literal subject/action of THAT spoken beat.
+3. REJECT generic filler or mismatches (e.g. random man walking stairs, close-up eye, abstract dust particles, unrelated studio anchors, or homonyms like "Fox News studio" when narration is about a forest fox).
+4. Give an honest "confidence" score (0-100):
+   - 75-100: Direct literal match to what is being spoken.
+   - 55-74: Clear topical match that fits naturally on screen.
+   - 0-54: Mismatch, vague filler, or wrong subject -> MUST set "selectedIdx": null.
+5. Whenever "selectedIdx" is null (or confidence < 60), provide:
+   - "refinedQuery": a sharper 2-4 word concrete English search query (no metaphors, no stop words).
+   - "imagePrompt": a vivid 10-18 word concrete English visual prompt describing the exact subject, action, setting, and lighting for AI image generation${params.isCartoon ? ' (in colorful 3D cartoon style)' : ''}.
+Return strictly valid JSON.`;
+
+  const userPrompt = JSON.stringify({
+    topic: params.topic,
+    niche: params.niche,
+    isCartoon: params.isCartoon,
+    scenes: params.scenes.map((s) => ({
+      sceneNumber: s.sceneNumber,
+      narration: s.narration.slice(0, 220),
+      visualDescription: s.visualDescription.slice(0, 180),
+      primaryKeyword: s.primaryKeyword,
+      candidates: s.candidates.map((c) => ({
+        idx: c.idx,
+        mediaType: c.mediaType,
+        provider: c.provider,
+        description: c.description.slice(0, 160),
+        lexicalScore: c.lexicalScore,
+      })),
+    })),
+    requiredJsonSchema: {
+      decisions: [
+        {
+          sceneNumber: 1,
+          selectedIdx: 0,
+          confidence: 88,
+          refinedQuery: 'optional 2-4 word concrete english query if selectedIdx is null',
+          imagePrompt: 'optional 10-18 word vivid literal visual prompt if selectedIdx is null',
+        },
+      ],
+    },
+  });
+
+  try {
+    const raw = await ai.generateJson<{
+      decisions?: Array<{
+        sceneNumber?: number;
+        selectedIdx?: number | null;
+        confidence?: number;
+        refinedQuery?: string;
+        imagePrompt?: string;
+      }>;
+    }>(systemPrompt, userPrompt);
+
+    const validSceneMap = new Map(params.scenes.map((s) => [s.sceneNumber, s]));
+    for (const item of raw.decisions || []) {
+      const sn = Number(item.sceneNumber);
+      const scene = validSceneMap.get(sn);
+      if (!scene) continue;
+
+      const rawIdx = item.selectedIdx;
+      const validIdx =
+        typeof rawIdx === 'number' &&
+        Number.isInteger(rawIdx) &&
+        scene.candidates.some((c) => c.idx === rawIdx)
+          ? rawIdx
+          : null;
+      const conf = Math.max(0, Math.min(100, Math.round(Number(item.confidence ?? (validIdx !== null ? 70 : 20)))));
+      decisions.set(sn, {
+        sceneNumber: sn,
+        selectedIdx: conf >= 55 ? validIdx : null,
+        confidence: conf,
+        refinedQuery: typeof item.refinedQuery === 'string' && item.refinedQuery.trim()
+          ? item.refinedQuery.trim().slice(0, 80)
+          : undefined,
+        imagePrompt: typeof item.imagePrompt === 'string' && item.imagePrompt.trim()
+          ? item.imagePrompt.trim().slice(0, 240)
+          : undefined,
+      });
+    }
+  } catch (err) {
+    console.warn(
+      `[AutoTube AI] Batch visual verification skipped (non-fatal): ${
+        err instanceof Error ? err.message : String(err)
+      }`
+    );
+  }
+
+  return decisions;
+}
+
 
 export async function generateSeoMetadataWithAI(
   ai: AIProviderClient,
